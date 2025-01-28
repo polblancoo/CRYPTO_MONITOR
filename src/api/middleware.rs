@@ -1,0 +1,1 @@
+// Por ahora vacío, agregaremos middleware de autenticación más adelante 
