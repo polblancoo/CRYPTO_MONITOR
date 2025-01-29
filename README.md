@@ -165,10 +165,10 @@ Este proyecto está bajo la Licencia MIT - ver el archivo [LICENSE](LICENSE) par
 
 ## Contacto 📧
 
-Tu Nombre - [@tu_twitter](https://twitter.com/tu_twitter)
-GitHub: [tu-usuario](https://github.com/tu-usuario)
+Tu Nombre - [@polblancoo](https://twitter.com/polblancoo)
+GitHub: [polblancoo](https://github.com/polblancoo/CRYPTO_MONITOR)
 
-Proyecto: [https://github.com/tu-usuario/crypto-monitor](https://github.com/tu-usuario/crypto-monitor)
+Proyecto: [https://github.com/polblancoo/crypto-monitor](https://github.com/tu-usuario/crypto-monitor)
 
 ## FAQ ❓
 
