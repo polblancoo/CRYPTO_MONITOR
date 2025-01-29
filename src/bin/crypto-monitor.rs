@@ -23,6 +23,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = Config::new()?;
     let db = Arc::new(Database::new(&config.database_url)?);
     
+    // Verificar token de Telegram
+    TelegramBot::verify_bot_token().await?;
+    
     // Crear y ejecutar el bot en un task separado
     let bot = TelegramBot::new(db.clone());
     let bot_handle = tokio::spawn(async move {

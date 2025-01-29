@@ -15,12 +15,31 @@ pub struct User {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum AlertType {
+    Price {
+        target_price: f64,
+        condition: AlertCondition,
+    },
+    Depeg {
+        target_price: f64,
+        differential: f64,  // porcentaje permitido de desviación
+        exchanges: Vec<String>,  // lista de exchanges a monitorear
+    },
+    PairDepeg {
+        token1: String,
+        token2: String,
+        expected_ratio: f64,
+        differential: f64,
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PriceAlert {
     pub id: Option<i64>,
     pub user_id: i64,
     pub symbol: String,
-    pub target_price: f64,
-    pub condition: AlertCondition,
+    pub alert_type: AlertType,
     pub created_at: i64,
     pub triggered_at: Option<i64>,
     pub is_active: bool,
@@ -37,7 +56,7 @@ pub struct ApiKey {
     pub is_active: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AlertCondition {
     Above,
     Below,
@@ -69,4 +88,55 @@ pub struct CryptoPrice {
     pub price: f64,
     pub exchange: String,
     pub timestamp: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum UserState {
+    Idle,
+    CreatingPriceAlert {
+        step: PriceAlertStep,
+        symbol: Option<String>,
+        target_price: Option<f64>,
+        condition: Option<AlertCondition>,
+    },
+    CreatingDepegAlert {
+        step: DepegAlertStep,
+        symbol: Option<String>,
+        target_price: Option<f64>,
+        differential: Option<f64>,
+        exchanges: Option<Vec<String>>,
+    },
+    CreatingPairAlert {
+        step: PairAlertStep,
+        token1: Option<String>,
+        token2: Option<String>,
+        expected_ratio: Option<f64>,
+        differential: Option<f64>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PriceAlertStep {
+    SelectSymbol,
+    EnterPrice,
+    SelectCondition,
+    Confirm,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DepegAlertStep {
+    SelectSymbol,
+    EnterTargetPrice,
+    EnterDifferential,
+    SelectExchanges,
+    Confirm,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum PairAlertStep {
+    SelectToken1,
+    SelectToken2,
+    EnterRatio,
+    EnterDifferential,
+    Confirm,
 } 

@@ -3,9 +3,10 @@ use std::error::Error;
 use std::fs;
 use std::path::Path;
 use chrono::Utc;
-use crate::models::{User, PriceAlert, ApiKey};
+use crate::models::{User, PriceAlert, ApiKey, AlertType, UserState};
 use std::sync::Mutex;
 use tracing::info;
+use serde_json;
 
 pub struct Database {
     conn: Mutex<Connection>,
@@ -57,8 +58,7 @@ impl Database {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 symbol TEXT NOT NULL,
-                target_price REAL NOT NULL,
-                condition TEXT NOT NULL,
+                alert_type TEXT NOT NULL,
                 created_at INTEGER NOT NULL,
                 triggered_at INTEGER,
                 is_active BOOLEAN NOT NULL DEFAULT 1,
@@ -81,19 +81,96 @@ impl Database {
             [],
         )?;
 
-        // Verificar que las tablas se crearon
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS user_states (
+                chat_id INTEGER PRIMARY KEY,
+                state TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )",
+            [],
+        )?;
+
+        // Verificar que las tablas se crearon antes de mover conn
         let table_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'price_alerts', 'api_keys')",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('users', 'price_alerts', 'api_keys', 'user_states')",
             [],
             |row| row.get(0),
         )?;
 
-        if table_count != 3 {
+        if table_count != 4 {
             return Err("No se pudieron crear todas las tablas".into());
         }
 
+        // Crear instancia de Database
+        let db = Self { conn: Mutex::new(conn) };
+        
+        // Migrar datos existentes si es necesario
+        Database::migrate_alerts_table(&db.conn.lock().unwrap())?;
+
         println!("Tablas creadas correctamente");
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(db)
+    }
+
+    fn migrate_alerts_table(conn: &Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Verificar si necesitamos migrar
+        let needs_migration = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('price_alerts') WHERE name = 'target_price'",
+                [],
+                |row| row.get::<_, i32>(0),
+            )
+            .unwrap_or(0) > 0;
+
+        if needs_migration {
+            info!("Iniciando migración de la tabla price_alerts");
+            
+            // Crear tabla temporal con nueva estructura
+            conn.execute(
+                "CREATE TABLE price_alerts_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    alert_type TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    triggered_at INTEGER,
+                    is_active BOOLEAN NOT NULL DEFAULT 1,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                )",
+                [],
+            )?;
+
+            // Migrar datos existentes
+            conn.execute(
+                r#"
+                INSERT INTO price_alerts_new (id, user_id, symbol, alert_type, created_at, triggered_at, is_active)
+                SELECT 
+                    id, 
+                    user_id, 
+                    symbol, 
+                    json_object(
+                        'type', 'Price',
+                        'data', json_object(
+                            'target_price', target_price,
+                            'condition', condition
+                        )
+                    ) as alert_type,
+                    created_at,
+                    triggered_at,
+                    is_active
+                FROM price_alerts
+                "#,
+                [],
+            )?;
+
+            // Reemplazar tabla antigua con la nueva
+            conn.execute("DROP TABLE price_alerts", [])?;
+            conn.execute("ALTER TABLE price_alerts_new RENAME TO price_alerts", [])?;
+
+            info!("Migración completada exitosamente");
+        }
+
+        Ok(())
     }
 
     pub fn create_user(&self, username: &str, password_hash: &str) -> SqliteResult<i64> {
@@ -131,16 +208,19 @@ impl Database {
     pub fn save_alert(&self, alert: &PriceAlert) -> SqliteResult<()> {
         let conn = self.conn.lock().unwrap();
         let now = Utc::now().timestamp();
+
+        // Serializar alert_type a JSON
+        let alert_type_json = serde_json::to_string(&alert.alert_type)
+            .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+
         conn.execute(
             "INSERT INTO price_alerts (
-                user_id, symbol, target_price, condition, 
-                created_at, is_active
-            ) VALUES (?, ?, ?, ?, ?, ?)",
+                user_id, symbol, alert_type, created_at, is_active
+            ) VALUES (?, ?, ?, ?, ?)",
             params![
                 alert.user_id,
                 alert.symbol,
-                alert.target_price,
-                format!("{:?}", alert.condition),
+                alert_type_json,
                 now,
                 true
             ],
@@ -152,21 +232,24 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         info!("Consultando alertas activas de la base de datos");
         let mut stmt = conn.prepare(
-            "SELECT id, user_id, symbol, target_price, condition, created_at, triggered_at, is_active 
+            "SELECT id, user_id, symbol, alert_type, created_at, triggered_at, is_active 
              FROM price_alerts 
              WHERE is_active = 1 AND triggered_at IS NULL"
         )?;
 
         let alerts = stmt.query_map([], |row| {
+            let alert_type_json: String = row.get(3)?;
+            let alert_type: AlertType = serde_json::from_str(&alert_type_json)
+                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+
             Ok(PriceAlert {
                 id: Some(row.get(0)?),
                 user_id: row.get(1)?,
                 symbol: row.get(2)?,
-                target_price: row.get(3)?,
-                condition: row.get(4)?,
-                created_at: row.get(5)?,
-                triggered_at: row.get(6)?,
-                is_active: row.get(7)?,
+                alert_type,
+                created_at: row.get(4)?,
+                triggered_at: row.get(5)?,
+                is_active: row.get(6)?,
             })
         })?
         .collect::<SqliteResult<Vec<_>>>()?;
@@ -260,8 +343,7 @@ impl Database {
                 id as 'id?',
                 user_id,
                 symbol,
-                target_price,
-                condition as 'condition: AlertCondition',
+                alert_type,
                 created_at,
                 triggered_at,
                 is_active
@@ -271,15 +353,18 @@ impl Database {
             "#
         )?;
         let alerts_iter = stmt.query_map(params![user_id], |row| {
+            let alert_type_json: String = row.get(3)?;
+            let alert_type: AlertType = serde_json::from_str(&alert_type_json)
+                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+
             Ok(PriceAlert {
                 id: row.get(0)?,
                 user_id: row.get(1)?,
                 symbol: row.get(2)?,
-                target_price: row.get(3)?,
-                condition: row.get(4)?,
-                created_at: row.get(5)?,
-                triggered_at: row.get(6)?,
-                is_active: row.get(7)?,
+                alert_type,
+                created_at: row.get(4)?,
+                triggered_at: row.get(5)?,
+                is_active: row.get(6)?,
             })
         })?;
 
@@ -315,21 +400,24 @@ impl Database {
     pub fn get_alert(&self, alert_id: i64) -> SqliteResult<Option<PriceAlert>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, user_id, symbol, target_price, condition, created_at, triggered_at, is_active 
+            "SELECT id, user_id, symbol, alert_type, created_at, triggered_at, is_active 
              FROM price_alerts 
              WHERE id = ?"
         )?;
 
         let mut rows = stmt.query_map([alert_id], |row| {
+            let alert_type_json: String = row.get(3)?;
+            let alert_type: AlertType = serde_json::from_str(&alert_type_json)
+                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+
             Ok(PriceAlert {
                 id: Some(row.get(0)?),
                 user_id: row.get(1)?,
                 symbol: row.get(2)?,
-                target_price: row.get(3)?,
-                condition: row.get(4)?,
-                created_at: row.get(5)?,
-                triggered_at: row.get(6)?,
-                is_active: row.get(7)?,
+                alert_type,
+                created_at: row.get(4)?,
+                triggered_at: row.get(5)?,
+                is_active: row.get(6)?,
             })
         })?;
 
@@ -400,6 +488,49 @@ impl Database {
                 })
             }
         ).optional()
+    }
+
+    pub fn save_user_state(&self, chat_id: i64, state: &UserState) -> SqliteResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let state_json = serde_json::to_string(state)
+            .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+
+        conn.execute(
+            "INSERT INTO user_states (chat_id, state, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT(chat_id) DO UPDATE SET
+             state = ?2,
+             updated_at = ?3",
+            params![chat_id, state_json, now],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn get_user_state(&self, chat_id: i64) -> SqliteResult<Option<UserState>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT state FROM user_states WHERE chat_id = ?"
+        )?;
+
+        let state = stmt.query_row([chat_id], |row| {
+            let state_json: String = row.get(0)?;
+            let state: UserState = serde_json::from_str(&state_json)
+                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+            Ok(state)
+        }).optional()?;
+
+        Ok(state)
+    }
+
+    pub fn clear_user_state(&self, chat_id: i64) -> Result<(), rusqlite::Error> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM user_states WHERE chat_id = ?",
+            [chat_id]
+        )?;
+        Ok(())
     }
 }
 

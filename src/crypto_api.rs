@@ -1,52 +1,70 @@
 use crate::models::CryptoPrice;
 use reqwest::Client;
-use std::{error::Error, time::Duration};
+use std::{error::Error, time::Duration, collections::HashMap};
 use serde::Deserialize;
-use std::collections::HashMap;
 use tokio::time::sleep;
 use tracing::{info, error};
+use crate::config::CONFIG;
 
 pub struct CryptoAPI {
     client: Client,
     api_key: String,
     symbol_to_id: HashMap<String, String>,
+    supported_exchanges: Vec<String>,
 }
 
 #[derive(Deserialize)]
 struct CoinGeckoResponse {
     #[serde(flatten)]
-    prices: std::collections::HashMap<String, Price>,
+    prices: HashMap<String, ExchangePrices>,
 }
 
 #[derive(Deserialize)]
-struct Price {
-    usd: f64,
+struct ExchangePrices {
+    #[serde(rename = "usd")]
+    price: f64,
+    #[serde(rename = "usd_24h_vol")]
+    volume_24h: Option<f64>,
+    #[serde(rename = "usd_market_cap")]
+    market_cap: Option<f64>,
+}
+
+#[derive(Debug)]
+pub struct ExchangePrice {
+    pub exchange: String,
+    pub price: f64,
+    pub volume_24h: Option<f64>,
 }
 
 impl CryptoAPI {
     pub fn new(api_key: String) -> Self {
         let mut symbol_to_id = HashMap::new();
-        symbol_to_id.insert("BTC".to_string(), "bitcoin".to_string());
-        symbol_to_id.insert("ETH".to_string(), "ethereum".to_string());
-        symbol_to_id.insert("USDT".to_string(), "tether".to_string());
-        symbol_to_id.insert("BNB".to_string(), "binancecoin".to_string());
-        symbol_to_id.insert("SOL".to_string(), "solana".to_string());
-        symbol_to_id.insert("XRP".to_string(), "ripple".to_string());
-        symbol_to_id.insert("USDC".to_string(), "usd-coin".to_string());
-        symbol_to_id.insert("ADA".to_string(), "cardano".to_string());
-        symbol_to_id.insert("AVAX".to_string(), "avalanche-2".to_string());
-        symbol_to_id.insert("DOGE".to_string(), "dogecoin".to_string());
+        
+        // Cargar los IDs de CoinGecko desde la configuración
+        for (symbol, info) in &CONFIG.cryptocurrencies {
+            symbol_to_id.insert(symbol.clone(), info.coingecko_id.clone());
+        }
 
         Self {
             client: Client::new(),
             api_key,
             symbol_to_id,
+            supported_exchanges: CONFIG.exchanges.supported.clone(),
         }
     }
 
     pub async fn get_price(&self, symbol: &str) -> Result<CryptoPrice, Box<dyn Error + Send + Sync>> {
+        // Obtener precio del exchange por defecto (binance)
+        self.get_price_from_exchange(symbol, "binance").await
+    }
+
+    pub async fn get_price_from_exchange(&self, symbol: &str, exchange: &str) -> Result<CryptoPrice, Box<dyn Error + Send + Sync>> {
         const MAX_RETRIES: u32 = 3;
         const RETRY_DELAY: u64 = 5;
+
+        if !self.supported_exchanges.contains(&exchange.to_string()) {
+            return Err(format!("Exchange no soportado: {}", exchange).into());
+        }
 
         let coin_id = self.symbol_to_id
             .get(&symbol.to_uppercase())
@@ -54,17 +72,18 @@ impl CryptoAPI {
         
         for attempt in 0..MAX_RETRIES {
             if attempt > 0 {
-                info!("Reintento {} de obtener precio para {}", attempt + 1, symbol);
+                info!("Reintento {} de obtener precio para {} en {}", attempt + 1, symbol, exchange);
                 sleep(Duration::from_secs(RETRY_DELAY)).await;
             }
 
             let url = format!(
-                "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies=usd&x_cg_demo_api_key={}",
+                "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies=usd&x_cg_demo_api_key={}&include_24hr_vol=true&include_market_cap=true&include_exchange_logo=true&exchanges={}",
                 coin_id,
-                self.api_key
+                self.api_key,
+                exchange
             );
             
-            info!("Intentando obtener precio de {}, URL: {}", symbol, url);
+            info!("Consultando precio de {} en {}", symbol, exchange);
 
             match self.client
                 .get(&url)
@@ -73,40 +92,66 @@ impl CryptoAPI {
                 .await
             {
                 Ok(response) => {
-                    info!("Respuesta recibida: Status {}", response.status());
+                    info!("Respuesta recibida de {}: Status {}", exchange, response.status());
                     if response.status().is_success() {
                         match response.json::<CoinGeckoResponse>().await {
                             Ok(data) => {
-                                if let Some(price) = data.prices.get(coin_id) {
-                                    info!("Precio obtenido para {}: ${}", symbol, price.usd);
+                                if let Some(prices) = data.prices.get(coin_id) {
+                                    info!("Precio de {} en {}: ${}", symbol, exchange, prices.price);
                                     return Ok(CryptoPrice {
                                         symbol: symbol.to_uppercase(),
-                                        price: price.usd,
-                                        exchange: "coingecko".to_string(),
+                                        price: prices.price,
+                                        exchange: exchange.to_string(),
                                         timestamp: chrono::Utc::now().timestamp(),
                                     });
                                 }
                             }
-                            Err(e) => error!("Error al deserializar respuesta: {}", e),
+                            Err(e) => error!("Error al deserializar respuesta de {}: {}", exchange, e),
                         }
                     } else {
                         let status = response.status();
                         let error_text = response.text().await.unwrap_or_default();
-                        error!("Error de API: {} - {}", status, error_text);
+                        error!("Error de API en {}: {} - {}", exchange, status, error_text);
                     }
                 }
-                Err(e) => error!("Error de conexión: {}", e),
+                Err(e) => error!("Error de conexión con {}: {}", exchange, e),
             }
         }
 
         Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::Other,
-            format!("No se pudo obtener el precio para {} después de {} intentos", symbol, MAX_RETRIES)
+            format!("No se pudo obtener el precio para {} en {} después de {} intentos", 
+                   symbol, exchange, MAX_RETRIES)
         )))
+    }
+
+    pub async fn get_prices_from_all_exchanges(&self, symbol: &str) -> Vec<ExchangePrice> {
+        let mut prices = Vec::new();
+        
+        for exchange in &self.supported_exchanges {
+            match self.get_price_from_exchange(symbol, exchange).await {
+                Ok(price) => {
+                    prices.push(ExchangePrice {
+                        exchange: exchange.clone(),
+                        price: price.price,
+                        volume_24h: None, // TODO: Implementar volumen
+                    });
+                }
+                Err(e) => {
+                    error!("Error al obtener precio de {} en {}: {}", symbol, exchange, e);
+                }
+            }
+        }
+
+        prices
     }
 
     pub fn supported_symbols(&self) -> Vec<String> {
         self.symbol_to_id.keys().cloned().collect()
+    }
+
+    pub fn supported_exchanges(&self) -> Vec<String> {
+        self.supported_exchanges.clone()
     }
 }
 
@@ -115,21 +160,29 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_get_price() {
+    async fn test_get_price_from_exchange() {
         let api = CryptoAPI::new("demo-key".to_string());
-        let result = api.get_price("BTC").await;
-        assert!(result.is_ok(), "Debería poder obtener el precio de Bitcoin");
+        let result = api.get_price_from_exchange("BTC", "binance").await;
+        assert!(result.is_ok(), "Debería poder obtener el precio de Bitcoin en Binance");
         
         let price = result.unwrap();
         assert_eq!(price.symbol, "BTC");
         assert!(price.price > 0.0, "El precio debería ser mayor que 0");
+        assert_eq!(price.exchange, "binance");
+    }
+
+    #[tokio::test]
+    async fn test_get_prices_from_all_exchanges() {
+        let api = CryptoAPI::new("demo-key".to_string());
+        let prices = api.get_prices_from_all_exchanges("BTC").await;
+        assert!(!prices.is_empty(), "Debería obtener precios de al menos un exchange");
     }
 
     #[test]
-    fn test_supported_symbols() {
+    fn test_supported_exchanges() {
         let api = CryptoAPI::new("demo-key".to_string());
-        let symbols = api.supported_symbols();
-        assert!(symbols.contains(&"BTC".to_string()));
-        assert!(symbols.contains(&"ETH".to_string()));
+        let exchanges = api.supported_exchanges();
+        assert!(exchanges.contains(&"binance".to_string()));
+        assert!(exchanges.contains(&"coinbase".to_string()));
     }
 } 

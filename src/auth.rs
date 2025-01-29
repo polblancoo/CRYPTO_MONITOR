@@ -4,8 +4,6 @@ use argon2::{
 };
 use crate::{Database, User};
 use argon2::password_hash::Error as ArgonError;
-use std::error::Error;
-use std::fmt;
 
 #[derive(Debug)]
 pub enum AuthError {

@@ -7,6 +7,7 @@ pub mod monitor;
 pub mod notify;
 pub mod timer;
 pub mod bot;
+pub mod config;
 
 pub use crate::auth::Auth;
 pub use crate::db::Database;

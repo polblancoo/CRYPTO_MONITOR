@@ -6,7 +6,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use crate::models::{User, PriceAlert, AlertCondition};
+use crate::{
+    models::{User, PriceAlert, AlertType, AlertCondition},
+    crypto_api::CryptoAPI,
+};
 use crate::Auth;
 use super::ApiState;
 use super::extractors::BearerAuth;
@@ -79,16 +82,32 @@ pub async fn login(
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CreateAlertRequest {
-    symbol: String,
-    target_price: f64,
-    condition: AlertCondition,
+pub struct CreatePriceAlertRequest {
+    pub symbol: String,
+    pub target_price: f64,
+    pub condition: AlertCondition,
 }
 
-pub async fn create_alert(
+#[derive(Debug, Deserialize)]
+pub struct CreateDepegAlertRequest {
+    pub symbol: String,
+    pub target_price: f64,
+    pub differential: f64,
+    pub exchanges: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePairAlertRequest {
+    pub token1: String,
+    pub token2: String,
+    pub expected_ratio: f64,
+    pub differential: f64,
+}
+
+pub async fn create_price_alert(
     Extension(state): Extension<ApiState>,
     BearerAuth(token): BearerAuth,
-    Json(payload): Json<CreateAlertRequest>,
+    Json(payload): Json<CreatePriceAlertRequest>,
 ) -> impl IntoResponse {
     match state.db.verify_api_key(&token) {
         Ok(Some(user)) => {
@@ -96,8 +115,79 @@ pub async fn create_alert(
                 id: None,
                 user_id: user.id,
                 symbol: payload.symbol,
-                target_price: payload.target_price,
-                condition: payload.condition,
+                alert_type: AlertType::Price {
+                    target_price: payload.target_price,
+                    condition: payload.condition,
+                },
+                created_at: chrono::Utc::now().timestamp(),
+                triggered_at: None,
+                is_active: true,
+            };
+
+            match state.db.save_alert(&alert) {
+                Ok(_) => StatusCode::CREATED.into_response(),
+                Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
+        }
+        Ok(None) => StatusCode::UNAUTHORIZED.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+pub async fn create_depeg_alert(
+    Extension(state): Extension<ApiState>,
+    BearerAuth(token): BearerAuth,
+    Json(payload): Json<CreateDepegAlertRequest>,
+) -> impl IntoResponse {
+    match state.db.verify_api_key(&token) {
+        Ok(Some(user)) => {
+            let exchanges = payload.exchanges.unwrap_or_else(|| vec![
+                "binance".to_string(),
+                "coinbase".to_string(),
+                "kraken".to_string(),
+            ]);
+
+            let alert = PriceAlert {
+                id: None,
+                user_id: user.id,
+                symbol: payload.symbol,
+                alert_type: AlertType::Depeg {
+                    target_price: payload.target_price,
+                    differential: payload.differential,
+                    exchanges,
+                },
+                created_at: chrono::Utc::now().timestamp(),
+                triggered_at: None,
+                is_active: true,
+            };
+
+            match state.db.save_alert(&alert) {
+                Ok(_) => StatusCode::CREATED.into_response(),
+                Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
+        }
+        Ok(None) => StatusCode::UNAUTHORIZED.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+pub async fn create_pair_alert(
+    Extension(state): Extension<ApiState>,
+    BearerAuth(token): BearerAuth,
+    Json(payload): Json<CreatePairAlertRequest>,
+) -> impl IntoResponse {
+    match state.db.verify_api_key(&token) {
+        Ok(Some(user)) => {
+            let alert = PriceAlert {
+                id: None,
+                user_id: user.id,
+                symbol: format!("{}/{}", payload.token1, payload.token2),
+                alert_type: AlertType::PairDepeg {
+                    token1: payload.token1,
+                    token2: payload.token2,
+                    expected_ratio: payload.expected_ratio,
+                    differential: payload.differential,
+                },
                 created_at: chrono::Utc::now().timestamp(),
                 triggered_at: None,
                 is_active: true,
@@ -181,6 +271,22 @@ pub async fn reset_api_key(
         Ok(None) => StatusCode::UNAUTHORIZED.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+pub async fn get_supported_exchanges(
+    Extension(_state): Extension<ApiState>,
+    BearerAuth(_): BearerAuth,
+) -> impl IntoResponse {
+    let api = CryptoAPI::new(std::env::var("COINGECKO_API_KEY").unwrap_or_default());
+    Json(api.supported_exchanges())
+}
+
+pub async fn get_supported_symbols(
+    Extension(_state): Extension<ApiState>,
+    BearerAuth(_): BearerAuth,
+) -> impl IntoResponse {
+    let api = CryptoAPI::new(std::env::var("COINGECKO_API_KEY").unwrap_or_default());
+    Json(api.supported_symbols())
 }
 
 // ... continuará con los handlers de alertas ... 
