@@ -5,6 +5,7 @@ use axum::{
     Extension,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use crate::models::{User, PriceAlert, AlertCondition};
 use crate::Auth;
 use super::ApiState;
@@ -144,6 +145,36 @@ pub async fn delete_alert(
                 }
                 Ok(Some(_)) => StatusCode::FORBIDDEN.into_response(),
                 Ok(None) => StatusCode::NOT_FOUND.into_response(),
+                Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            }
+        }
+        Ok(None) => StatusCode::UNAUTHORIZED.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResetApiKeyRequest {
+    username: String,
+    password: String,
+}
+
+pub async fn reset_api_key(
+    Extension(state): Extension<ApiState>,
+    Json(payload): Json<ResetApiKeyRequest>,
+) -> impl IntoResponse {
+    let auth = Auth::new(state.db.as_ref());
+    
+    match auth.login(&payload.username, &payload.password) {
+        Ok(Some(user)) => {
+            match state.db.create_api_key(user.id) {
+                Ok(api_key) => {
+                    let response = json!({
+                        "message": "API key regenerada exitosamente",
+                        "api_key": api_key.key
+                    });
+                    (StatusCode::OK, Json(response)).into_response()
+                }
                 Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             }
         }

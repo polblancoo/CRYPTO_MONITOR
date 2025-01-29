@@ -1,17 +1,18 @@
-use rusqlite::{Connection, params, Result as SqliteResult};
+use rusqlite::{Connection, params, Result as SqliteResult, OptionalExtension};
 use std::error::Error;
 use std::fs;
 use std::path::Path;
 use chrono::Utc;
 use crate::models::{User, PriceAlert, ApiKey};
 use std::sync::Mutex;
+use tracing::info;
 
 pub struct Database {
     conn: Mutex<Connection>,
 }
 
 impl Database {
-    pub fn new(database_url: &str) -> Result<Self, Box<dyn Error>> {
+    pub fn new(database_url: &str) -> Result<Self, Box<dyn Error + Send + Sync>> {
         // Remover el prefijo "sqlite:" y obtener la ruta absoluta
         let db_path = database_url.trim_start_matches("sqlite:");
         
@@ -43,6 +44,7 @@ impl Database {
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 api_key TEXT UNIQUE,
+                telegram_chat_id INTEGER,
                 created_at INTEGER NOT NULL,
                 last_login INTEGER,
                 is_active BOOLEAN NOT NULL DEFAULT 1
@@ -113,9 +115,10 @@ impl Database {
                 username: row.get(1)?,
                 password_hash: row.get(2)?,
                 api_key: row.get(3)?,
-                created_at: row.get(4)?,
-                last_login: row.get(5)?,
-                is_active: row.get(6)?,
+                telegram_chat_id: row.get(4)?,
+                created_at: row.get(5)?,
+                last_login: row.get(6)?,
+                is_active: row.get(7)?,
             })
         })?;
 
@@ -147,6 +150,7 @@ impl Database {
 
     pub fn get_active_alerts(&self) -> SqliteResult<Vec<PriceAlert>> {
         let conn = self.conn.lock().unwrap();
+        info!("Consultando alertas activas de la base de datos");
         let mut stmt = conn.prepare(
             "SELECT id, user_id, symbol, target_price, condition, created_at, triggered_at, is_active 
              FROM price_alerts 
@@ -167,6 +171,7 @@ impl Database {
         })?
         .collect::<SqliteResult<Vec<_>>>()?;
 
+        info!("Encontradas {} alertas activas en la base de datos", alerts.len());
         Ok(alerts)
     }
 
@@ -226,9 +231,10 @@ impl Database {
                 username: row.get(1)?,
                 password_hash: row.get(2)?,
                 api_key: row.get(3)?,
-                created_at: row.get(4)?,
-                last_login: row.get(5)?,
-                is_active: row.get(6)?,
+                telegram_chat_id: row.get(4)?,
+                created_at: row.get(5)?,
+                last_login: row.get(6)?,
+                is_active: row.get(7)?,
             })
         })?;
 
@@ -293,9 +299,10 @@ impl Database {
                 username: row.get(1)?,
                 password_hash: row.get(2)?,
                 api_key: row.get(3)?,
-                created_at: row.get(4)?,
-                last_login: row.get(5)?,
-                is_active: row.get(6)?,
+                telegram_chat_id: row.get(4)?,
+                created_at: row.get(5)?,
+                last_login: row.get(6)?,
+                is_active: row.get(7)?,
             })
         })?;
 
@@ -339,6 +346,60 @@ impl Database {
             params![alert_id],
         )?;
         Ok(())
+    }
+
+    pub fn update_user_telegram_chat_id(&self, user_id: i64, chat_id: i64) -> SqliteResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE users SET telegram_chat_id = ? WHERE id = ?",
+            params![chat_id, user_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_user_api_key(&self, user_id: i64) -> SqliteResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT key FROM api_keys 
+             WHERE user_id = ? AND is_active = 1 
+             ORDER BY created_at DESC LIMIT 1"
+        )?;
+        
+        let mut rows = stmt.query_map([user_id], |row| row.get(0))?;
+        
+        match rows.next() {
+            Some(result) => Ok(Some(result?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn get_user_telegram_chat_id(&self, user_id: i64) -> SqliteResult<Option<i64>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT telegram_chat_id FROM users WHERE id = ?",
+            [user_id],
+            |row| row.get(0)
+        ).optional()
+    }
+
+    pub fn get_user_by_telegram_id(&self, chat_id: i64) -> SqliteResult<Option<User>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT * FROM users WHERE telegram_chat_id = ?",
+            [chat_id],
+            |row| {
+                Ok(User {
+                    id: row.get(0)?,
+                    username: row.get(1)?,
+                    password_hash: row.get(2)?,
+                    api_key: row.get(3)?,
+                    telegram_chat_id: row.get(4)?,
+                    created_at: row.get(5)?,
+                    last_login: row.get(6)?,
+                    is_active: row.get(7)?,
+                })
+            }
+        ).optional()
     }
 }
 

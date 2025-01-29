@@ -18,9 +18,8 @@ pub struct ApiState {
     db: Arc<Database>,
 }
 
-pub async fn start_server(db: Database, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn start_server(db: Arc<Database>, port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // Configurar el estado compartido
-    let db = Arc::new(db);
     let state = ApiState { db: db.clone() };
 
     // Configurar CORS
@@ -33,6 +32,7 @@ pub async fn start_server(db: Database, port: u16) -> Result<(), Box<dyn std::er
         .route("/api/alerts", post(handlers::create_alert))
         .route("/api/alerts", get(handlers::get_user_alerts))
         .route("/api/alerts/:id", delete(handlers::delete_alert))
+        .route("/api/reset-api-key", post(handlers::reset_api_key))
         .layer(Extension(state))
         .layer(cors);
 

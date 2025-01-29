@@ -6,11 +6,14 @@ pub mod models;
 pub mod monitor;
 pub mod notify;
 pub mod timer;
+pub mod bot;
 
 pub use crate::auth::Auth;
 pub use crate::db::Database;
 pub use crate::models::*;
 pub use crate::crypto_api::CryptoAPI;
+pub use crate::monitor::PriceMonitor;
+pub use crate::notify::NotificationService;
 
 use dotenv::dotenv;
 use std::env;
@@ -25,7 +28,7 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn new() -> Result<Self, Box<dyn Error>> {
+    pub fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
         dotenv().ok();
 
         Ok(Self {
@@ -37,7 +40,7 @@ impl Config {
     }
 }
 
-pub async fn start_monitor(config: &Config, db: Arc<Database>) -> Result<(), Box<dyn Error>> {
+pub async fn start_monitor(config: &Config, db: Arc<Database>) -> Result<(), Box<dyn Error + Send + Sync>> {
     let api = CryptoAPI::new(config.coingecko_api_key.clone());
     let notification_service = NotificationService::new(config.telegram_token.clone());
     let monitor = PriceMonitor::new(

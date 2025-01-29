@@ -8,6 +8,7 @@ pub struct User {
     #[serde(skip_serializing)]
     pub password_hash: String,
     pub api_key: Option<String>,
+    pub telegram_chat_id: Option<i64>,
     pub created_at: i64,
     pub last_login: Option<i64>,
     pub is_active: bool,
@@ -62,7 +63,7 @@ impl ToSql for AlertCondition {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CryptoPrice {
     pub symbol: String,
     pub price: f64,
