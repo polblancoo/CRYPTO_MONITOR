@@ -29,7 +29,7 @@ Crea un archivo `.env` en la raíz del proyecto:
 DATABASE_URL=sqlite:./data/crypto_monitor.db
 
 # API Keys
-TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz  # De @BotFather
+TELEGRAM_BOT_TOKEN=1fgdhdghhhdgdfg# De @BotFather
 COINGECKO_API_KEY=CG-XXXXXXXXXXXXXXXXXXXXXXX              # De CoinGecko
 
 # Configuración
