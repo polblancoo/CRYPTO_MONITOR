@@ -1,8 +1,5 @@
 use std::env;
 use serde::Deserialize;
-use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
 use once_cell::sync::Lazy;
 
 pub struct Config {
@@ -29,10 +26,11 @@ impl Config {
 
 #[derive(Debug, Deserialize)]
 pub struct CryptoConfig {
-    pub cryptocurrencies: HashMap<String, CryptoInfo>,
-    pub stablecoins: HashMap<String, StablecoinInfo>,
-    pub synthetic_pairs: HashMap<String, PairInfo>,
-    pub exchanges: ExchangeConfig,
+    pub cryptocurrencies: Vec<String>,
+    pub stablecoins: Vec<String>,
+    pub synthetic_pairs: Vec<(String, String)>,
+    pub exchanges: Vec<String>,
+    pub check_interval: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,37 +58,62 @@ pub struct ExchangeConfig {
 }
 
 pub static CONFIG: Lazy<CryptoConfig> = Lazy::new(|| {
-    let config_path = Path::new("config/crypto_config.toml");
-    let config_str = fs::read_to_string(config_path)
-        .expect("Failed to read crypto_config.toml");
-    toml::from_str(&config_str)
-        .expect("Failed to parse crypto_config.toml")
+    let check_interval = env::var("CHECK_INTERVAL")
+        .unwrap_or_else(|_| "300".to_string())
+        .parse()
+        .unwrap_or(300);
+
+    CryptoConfig {
+        cryptocurrencies: vec![
+            "BTC".to_string(),
+            "ETH".to_string(),
+            "RUNE".to_string(),
+            "MATIC".to_string(),
+            "SOL".to_string(),
+        ],
+        stablecoins: vec![
+            "USDT".to_string(),
+            "USDC".to_string(),
+            "BUSD".to_string(),
+        ],
+        synthetic_pairs: vec![
+            ("BTC".to_string(), "USDT".to_string()),
+            ("ETH".to_string(), "USDT".to_string()),
+            ("RUNE".to_string(), "USDT".to_string()),
+        ],
+        exchanges: vec![
+            "binance".to_string(),
+        ],
+        check_interval,
+    }
 });
 
 impl CryptoConfig {
     pub fn get_symbol_display(&self, symbol: &str) -> String {
-        if let Some(info) = self.cryptocurrencies.get(symbol) {
-            format!("{} ({})", symbol, info.name)
+        if self.cryptocurrencies.contains(&symbol.to_string()) {
+            symbol.to_string()
         } else {
             symbol.to_string()
         }
     }
 
     pub fn get_supported_symbols(&self) -> Vec<String> {
-        self.cryptocurrencies.keys()
-            .map(|s| s.to_string())
-            .collect()
+        self.cryptocurrencies.clone()
     }
 
     pub fn get_supported_pairs(&self) -> Vec<(String, String)> {
-        self.synthetic_pairs.values()
-            .map(|pair| (pair.token1.clone(), pair.token2.clone()))
-            .collect()
+        self.synthetic_pairs.clone()
     }
 
     pub fn get_stablecoins(&self) -> Vec<String> {
-        self.stablecoins.keys()
-            .map(|s| s.to_string())
-            .collect()
+        self.stablecoins.clone()
+    }
+
+    pub fn is_supported_exchange(&self, exchange: &str) -> bool {
+        self.exchanges.contains(&exchange.to_string())
+    }
+
+    pub fn get_check_interval(&self) -> u64 {
+        self.check_interval
     }
 } 

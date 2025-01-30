@@ -36,20 +36,20 @@ pub struct ExchangePrice {
     pub volume_24h: Option<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CoinInfo {
+    pub symbol: String,
+    pub name: String,
+    pub supported_exchanges: Vec<String>,
+}
+
 impl CryptoAPI {
     pub fn new(api_key: String) -> Self {
-        let mut symbol_to_id = HashMap::new();
-        
-        // Cargar los IDs de CoinGecko desde la configuración
-        for (symbol, info) in &CONFIG.cryptocurrencies {
-            symbol_to_id.insert(symbol.clone(), info.coingecko_id.clone());
-        }
-
         Self {
             client: Client::new(),
             api_key,
-            symbol_to_id,
-            supported_exchanges: CONFIG.exchanges.supported.clone(),
+            symbol_to_id: HashMap::new(), // Simplificado por ahora
+            supported_exchanges: CONFIG.exchanges.clone(),
         }
     }
 
@@ -153,6 +153,41 @@ impl CryptoAPI {
     pub fn supported_exchanges(&self) -> Vec<String> {
         self.supported_exchanges.clone()
     }
+}
+
+pub async fn get_supported_coins() -> Result<Vec<CoinInfo>, Box<dyn Error>> {
+    let mut coins = Vec::new();
+    
+    for symbol in &CONFIG.cryptocurrencies {
+        coins.push(CoinInfo {
+            symbol: symbol.clone(),
+            name: symbol.clone(),
+            supported_exchanges: CONFIG.exchanges.clone(),
+        });
+    }
+    
+    Ok(coins)
+}
+
+pub async fn get_coin_price(_symbol: &str) -> Result<f64, Box<dyn Error>> {
+    // Implementar lógica real de precio aquí
+    Ok(0.0)
+}
+
+pub async fn get_stablecoin_price(_symbol: &str) -> Result<f64, Box<dyn Error>> {
+    // Implementar lógica real de precio aquí
+    Ok(1.0)
+}
+
+pub async fn get_pair_ratio(token1: &str, token2: &str) -> Result<f64, Box<dyn Error>> {
+    let price1 = get_coin_price(token1).await?;
+    let price2 = get_coin_price(token2).await?;
+    
+    if price2 == 0.0 {
+        return Err("División por cero".into());
+    }
+    
+    Ok(price1 / price2)
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@ pub mod notify;
 pub mod timer;
 pub mod bot;
 pub mod config;
+pub mod exchanges;
 
 pub use crate::auth::Auth;
 pub use crate::db::Database;
@@ -20,6 +21,7 @@ use dotenv::dotenv;
 use std::env;
 use std::error::Error;
 use std::sync::Arc;
+use crate::exchanges::ExchangeManager;
 
 pub struct Config {
     pub database_url: String,
@@ -52,4 +54,24 @@ pub async fn start_monitor(config: &Config, db: Arc<Database>) -> Result<(), Box
     );
 
     monitor.start().await
+}
+
+pub async fn start_api(_port: u16, db: Arc<Database>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let exchange_manager = Arc::new(ExchangeManager::new()?);
+    
+    api::start_server(db, exchange_manager).await?;
+
+    Ok(())
+}
+
+pub async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let db = Arc::new(Database::new("crypto.db").await?);
+    let exchange_manager = Arc::new(ExchangeManager::new()?);
+    
+    api::start_server(
+        Arc::clone(&db),
+        Arc::clone(&exchange_manager)
+    ).await?;
+
+    Ok(())
 } 

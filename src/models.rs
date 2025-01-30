@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use rusqlite::{types::{FromSql, FromSqlResult, ValueRef, ToSql, ToSqlOutput}, Result as SqliteResult};
+use rust_decimal::Decimal;
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct User {
@@ -14,7 +16,7 @@ pub struct User {
     pub is_active: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum AlertType {
     Price {
@@ -34,13 +36,13 @@ pub enum AlertType {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PriceAlert {
     pub id: Option<i64>,
     pub user_id: i64,
     pub symbol: String,
     pub alert_type: AlertType,
-    pub created_at: i64,
+    pub created_at: Option<i64>,
     pub triggered_at: Option<i64>,
     pub is_active: bool,
 }
@@ -139,4 +141,63 @@ pub enum PairAlertStep {
     EnterRatio,
     EnterDifferential,
     Confirm,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum OrderSide {
+    Buy,
+    Sell,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum OrderType {
+    Market,
+    Limit,
+    StopLoss,
+    StopLossLimit,
+    TakeProfit,
+    TakeProfitLimit,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OrderRequest {
+    pub exchange: String,
+    pub symbol: String,
+    pub side: OrderSide,
+    pub order_type: OrderType,
+    pub quantity: Decimal,
+    pub price: Option<Decimal>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Order {
+    pub id: String,
+    pub symbol: String,
+    pub order_type: OrderType,
+    pub side: OrderSide,
+    pub price: Option<Decimal>,
+    pub quantity: Decimal,
+    pub filled_quantity: Decimal,
+    pub status: OrderStatus,
+    #[serde(with = "chrono::serde::ts_seconds")]
+    pub created_at: DateTime<Utc>,
+    #[serde(with = "chrono::serde::ts_seconds")]
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum OrderStatus {
+    New,
+    PartiallyFilled,
+    Filled,
+    Canceled,
+    Rejected,
+    Expired,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Balance {
+    pub asset: String,
+    pub free: Decimal,
+    pub locked: Decimal,
 } 

@@ -1,0 +1,69 @@
+# Configuración de criptomonedas soportadas
+[cryptocurrencies]
+# Formato: "symbol" = { name = "Full Name", coingecko_id = "coingecko-id" }
+BTC = { name = "Bitcoin", coingecko_id = "bitcoin" }
+ETH = { name = "Ethereum", coingecko_id = "ethereum" }
+USDT = { name = "Tether", coingecko_id = "tether" }
+BNB = { name = "Binance Coin", coingecko_id = "binancecoin" }
+SOL = { name = "Solana", coingecko_id = "solana" }
+XRP = { name = "Ripple", coingecko_id = "ripple" }
+USDC = { name = "USD Coin", coingecko_id = "usd-coin" }
+ADA = { name = "Cardano", coingecko_id = "cardano" }
+AVAX = { name = "Avalanche", coingecko_id = "avalanche-2" }
+DOGE = { name = "Dogecoin", coingecko_id = "dogecoin" }
+DOT = { name = "Polkadot", coingecko_id = "polkadot" }
+MATIC = { name = "Polygon", coingecko_id = "matic-network" }
+LINK = { name = "Chainlink", coingecko_id = "chainlink" }
+INJ = { name = "Injective", coingecko_id = "injective-protocol" }
+ATOM = { name = "Cosmos", coingecko_id = "cosmos" }
+
+# Configuración de stablecoins
+[stablecoins]
+USDT = { name = "Tether", target_price = 1.0 }
+USDC = { name = "USD Coin", target_price = 1.0 }
+BUSD = { name = "Binance USD", target_price = 1.0 }
+DAI = { name = "Dai", target_price = 1.0 }
+FRAX = { name = "Frax", target_price = 1.0 }
+LUSD = { name = "Liquity USD", target_price = 1.0 }
+MAI = { name = "Mai", target_price = 1.0 }
+USDD = { name = "USDD", target_price = 1.0 }
+sUSD = { name = "Synthetix USD", target_price = 1.0 }
+USDP = { name = "Pax Dollar", target_price = 1.0 }
+
+# Configuración de pares sintéticos
+[synthetic_pairs]
+# Ethereum y derivados
+ETH_stETH = { token1 = "ETH", token2 = "stETH", expected_ratio = 1.0 }
+ETH_rETH = { token1 = "ETH", token2 = "rETH", expected_ratio = 1.0 }
+ETH_cbETH = { token1 = "ETH", token2 = "cbETH", expected_ratio = 1.0 }
+ETH_ankrETH = { token1 = "ETH", token2 = "ankrETH", expected_ratio = 1.0 }
+ETH_frxETH = { token1 = "ETH", token2 = "frxETH", expected_ratio = 1.0 }
+
+# Bitcoin y derivados
+BTC_WBTC = { token1 = "BTC", token2 = "WBTC", expected_ratio = 1.0 }
+BTC_renBTC = { token1 = "BTC", token2 = "renBTC", expected_ratio = 1.0 }
+BTC_sBTC = { token1 = "BTC", token2 = "sBTC", expected_ratio = 1.0 }
+BTC_tBTC = { token1 = "BTC", token2 = "tBTC", expected_ratio = 1.0 }
+
+# Otros tokens y sus versiones sintéticas
+SOL_mSOL = { token1 = "SOL", token2 = "mSOL", expected_ratio = 1.0 }
+SOL_stSOL = { token1 = "SOL", token2 = "stSOL", expected_ratio = 1.0 }
+ATOM_stATOM = { token1 = "ATOM", token2 = "stATOM", expected_ratio = 1.0 }
+MATIC_stMATIC = { token1 = "MATIC", token2 = "stMATIC", expected_ratio = 1.0 }
+INJ_sINJ = { token1 = "INJ", token2 = "sINJ", expected_ratio = 1.0 }
+DOT_stDOT = { token1 = "DOT", token2 = "stDOT", expected_ratio = 1.0 }
+
+# Configuración de exchanges soportados
+[exchanges]
+supported = [
+    "binance",
+    "coinbase",
+    "kraken",
+    "kucoin",
+    "huobi",
+    "okx",
+    "bybit",
+    "gate",
+    "bitfinex",
+    "gemini"
+]

@@ -5,19 +5,32 @@ use axum::{
     Router,
 };
 use super::handlers;
+use super::ApiState;
 
-pub fn api_routes() -> Router {
+pub fn api_routes() -> Router<ApiState> {
     Router::new()
-        // Rutas de autenticación
+        // Autenticación
         .route("/auth/register", post(handlers::register))
         .route("/auth/login", post(handlers::login))
         .route("/auth/reset-api-key", post(handlers::reset_api_key))
-        // Rutas de alertas
+        
+        // Alertas
         .route("/alerts/price", post(handlers::create_price_alert))
         .route("/alerts/depeg", post(handlers::create_depeg_alert))
         .route("/alerts/pair", post(handlers::create_pair_alert))
         .route("/alerts", get(handlers::get_user_alerts))
         .route("/alerts/:id", delete(handlers::delete_alert))
-        .route("/alerts/exchanges", get(handlers::get_supported_exchanges))
-        .route("/alerts/symbols", get(handlers::get_supported_symbols))
+        
+        // Información de mercado
+        .route("/exchanges", get(handlers::get_supported_exchanges))
+        .route("/symbols", get(handlers::get_supported_symbols))
+}
+
+pub fn trading_routes() -> Router<ApiState> {
+    Router::new()
+        // Trading
+        .route("/orders", post(handlers::place_order))
+        .route("/orders", get(handlers::get_orders))
+        .route("/orders/:order_id", delete(handlers::cancel_order))
+        .route("/balance", get(handlers::get_balance))
 } 

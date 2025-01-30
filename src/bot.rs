@@ -19,6 +19,10 @@ use tracing::{info, error};
 use crate::auth::Auth;
 use crate::models::{User, PriceAlert, AlertCondition, AlertType, UserState, PriceAlertStep, DepegAlertStep, PairAlertStep};
 use crate::config::CONFIG;
+use crate::exchanges::ExchangeManager;
+use tokio_rusqlite::Error as AsyncSqliteError;
+
+mod handlers;
 
 #[derive(BotCommands, Clone, Debug)]
 #[command(
@@ -44,6 +48,12 @@ pub enum Command {
     Delete,
     #[command(description = "muestra los símbolos soportados")]
     Symbols,
+    #[command(description = "Ver balance")]
+    Balance,
+    #[command(description = "Crear orden")]
+    Order(String),
+    #[command(description = "Ver órdenes abiertas")]
+    Orders,
 }
 
 impl Command {
@@ -62,19 +72,50 @@ impl Command {
     }
 }
 
+#[derive(Debug)]
+pub enum BotError {
+    RequestError(RequestError),
+    InvalidInput(String),
+    DatabaseError(AsyncSqliteError),
+}
+
+impl From<RequestError> for BotError {
+    fn from(err: RequestError) -> Self {
+        BotError::RequestError(err)
+    }
+}
+
+impl From<AsyncSqliteError> for BotError {
+    fn from(err: AsyncSqliteError) -> Self {
+        BotError::DatabaseError(err)
+    }
+}
+
+impl From<std::num::ParseFloatError> for BotError {
+    fn from(err: std::num::ParseFloatError) -> Self {
+        BotError::InvalidInput(format!("Número inválido: {}", err))
+    }
+}
+
 #[derive(Clone)]
 pub struct TelegramBot {
-    db: Arc<Database>,
+    pub db: Arc<Database>,
+    pub exchange_manager: Arc<ExchangeManager>,
+    pub bot: Bot,
 }
 
 impl TelegramBot {
-    pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
+    pub fn new(db: Arc<Database>, exchange_manager: Arc<ExchangeManager>, bot: Bot) -> Self {
+        Self { 
+            db,
+            exchange_manager,
+            bot,
+        }
     }
 
     // Helper para convertir errores de SQLite a RequestError
-    fn db_error_to_request_error(e: rusqlite::Error) -> RequestError {
-        RequestError::Api(ApiError::Unknown(format!("Database error: {}", e)))
+    fn db_error_to_request_error(e: tokio_rusqlite::Error) -> RequestError {
+        RequestError::Api(ApiError::Unknown(e.to_string()))
     }
 
     async fn handle_command(&self, bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
@@ -117,6 +158,18 @@ impl TelegramBot {
             Command::Symbols => {
                 self.handle_symbols(bot, msg).await?;
             }
+            Command::Balance => {
+                match handlers::handle_balance(bot, msg, self.exchange_manager.clone()).await {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(RequestError::Api(ApiError::Unknown(e.to_string()))),
+                }?;
+            }
+            Command::Order(text) => {
+                handlers::handle_order(bot, msg, text, self.exchange_manager.clone()).await?;
+            }
+            Command::Orders => {
+                handlers::handle_orders(bot, msg, self.exchange_manager.clone()).await?;
+            }
         }
         Ok(())
     }
@@ -133,7 +186,8 @@ impl TelegramBot {
                             condition: None,
                         };
                         self.db.save_user_state(message.chat.id.0, &state)
-                            .map_err(Self::db_error_to_request_error)?;
+                            .await
+                            .map_err(|e| Self::db_error_to_request_error(e))?;
                         self.handle_price_alert_step(&bot, message, &state).await?;
                     }
                     "create_depeg_alert" => {
@@ -145,7 +199,8 @@ impl TelegramBot {
                             exchanges: None,
                         };
                         self.db.save_user_state(message.chat.id.0, &state)
-                            .map_err(Self::db_error_to_request_error)?;
+                            .await
+                            .map_err(|e| Self::db_error_to_request_error(e))?;
                         self.handle_depeg_alert_step(&bot, message, &state).await?;
                     }
                     "create_pair_alert" => {
@@ -157,13 +212,15 @@ impl TelegramBot {
                             differential: None,
                         };
                         self.db.save_user_state(message.chat.id.0, &state)
-                            .map_err(Self::db_error_to_request_error)?;
+                            .await
+                            .map_err(|e| Self::db_error_to_request_error(e))?;
                         self.handle_pair_depeg_step(&bot, message, &state).await?;
                     }
                     s if s.starts_with("symbol_") => {
                         let symbol = s.trim_start_matches("symbol_").to_string();
                         if let Some(state) = self.db.get_user_state(message.chat.id.0)
-                            .map_err(Self::db_error_to_request_error)? {
+                            .await
+                            .map_err(|e| Self::db_error_to_request_error(e))? {
                             match state {
                                 UserState::CreatingPriceAlert { step: PriceAlertStep::SelectSymbol, .. } => {
                                     let new_state = UserState::CreatingPriceAlert {
@@ -173,7 +230,8 @@ impl TelegramBot {
                                         condition: None,
                                     };
                                     self.db.save_user_state(message.chat.id.0, &new_state)
-                                        .map_err(Self::db_error_to_request_error)?;
+                                        .await
+                                        .map_err(|e| Self::db_error_to_request_error(e))?;
                                     self.handle_price_alert_step(&bot, message, &new_state).await?;
                                 }
                                 UserState::CreatingDepegAlert { step: DepegAlertStep::SelectSymbol, .. } => {
@@ -186,7 +244,8 @@ impl TelegramBot {
                                     };
                                     
                                     self.db.save_user_state(message.chat.id.0, &new_state)
-                                        .map_err(Self::db_error_to_request_error)?;
+                                        .await
+                                        .map_err(|e| Self::db_error_to_request_error(e))?;
                                     
                                     self.handle_depeg_alert_step(&bot, message, &new_state).await?;
                                 }
@@ -208,34 +267,42 @@ impl TelegramBot {
                         };
                         
                         if let Some(state) = self.db.get_user_state(message.chat.id.0)
-                            .map_err(Self::db_error_to_request_error)? {
+                            .await
+                            .map_err(|e| Self::db_error_to_request_error(e))? {
                             if let UserState::CreatingPriceAlert { symbol, target_price, .. } = state {
                                 if let (Some(symbol), Some(price)) = (symbol, target_price) {
                                     // Obtener usuario
-                                    let user = match self.get_user_by_chat_id(message.chat.id.0).await? {
-                                        Some(user) => user,
-                                        None => {
-                                            bot.send_message(message.chat.id, "❌ Debes registrarte primero usando /register").await?;
-                                            return Ok(());
-                                        }
-                                    };
+                                    let _user = self.get_user_by_chat_id(message.chat.id.0).await?;
 
                                     // Crear la alerta
                                     let alert = PriceAlert {
                                         id: None,
-                                        user_id: user.id,
+                                        user_id: _user.id,
                                         symbol: symbol.clone(),
                                         alert_type: AlertType::Price {
                                             target_price: price,
                                             condition: condition.clone(),
                                         },
-                                        is_active: true,
-                                        created_at: chrono::Utc::now().timestamp(),
+                                        created_at: Some(chrono::Utc::now().timestamp()),
                                         triggered_at: None,
+                                        is_active: true,
+                                    };
+
+                                    // Clonar los valores necesarios antes de mover alert
+                                    let symbol = alert.symbol.clone();
+                                    let target_price = if let AlertType::Price { target_price, .. } = alert.alert_type {
+                                        target_price
+                                    } else {
+                                        0.0
+                                    };
+                                    let condition = if let AlertType::Price { condition, .. } = &alert.alert_type {
+                                        condition.clone()
+                                    } else {
+                                        AlertCondition::Above
                                     };
 
                                     // Guardar la alerta
-                                    match self.db.save_alert(&alert) {
+                                    match self.db.save_alert(alert).await {
                                         Ok(_) => {
                                             bot.send_message(
                                                 message.chat.id,
@@ -244,13 +311,14 @@ impl TelegramBot {
                                                      Símbolo: {}\n\
                                                      Precio objetivo: ${:.2}\n\
                                                      Condición: {:?}",
-                                                    symbol, price, condition
+                                                    symbol, target_price, condition
                                                 )
                                             ).await?;
                                             
                                             // Limpiar el estado del usuario
                                             self.db.clear_user_state(message.chat.id.0)
-                                                .map_err(Self::db_error_to_request_error)?;
+                                                .await
+                                                .map_err(|e| Self::db_error_to_request_error(e))?;
                                         }
                                         Err(e) => {
                                             error!("Error al crear alerta: {}", e);
@@ -267,15 +335,9 @@ impl TelegramBot {
                             .map_err(|_| RequestError::Api(ApiError::Unknown("ID inválido".to_string())))?;
 
                         // Verificar que el usuario es dueño de la alerta
-                        let _user = match self.get_user_by_chat_id(message.chat.id.0).await? {
-                            Some(user) => user,
-                            None => {
-                                bot.send_message(message.chat.id, "❌ Usuario no encontrado").await?;
-                                return Ok(());
-                            }
-                        };
+                        let _user = self.get_user_by_chat_id(message.chat.id.0).await?;
 
-                        match self.db.delete_alert(alert_id) {
+                        match self.db.delete_alert(alert_id).await {
                             Ok(_) => {
                                 bot.send_message(
                                     message.chat.id,
@@ -291,7 +353,8 @@ impl TelegramBot {
                     s if s.starts_with("pair_") => {
                         let pair = s.trim_start_matches("pair_").replace("_", "/");
                         if let Some(state) = self.db.get_user_state(message.chat.id.0)
-                            .map_err(Self::db_error_to_request_error)? {
+                            .await
+                            .map_err(|e| Self::db_error_to_request_error(e))? {
                             if let UserState::CreatingPairAlert { step: PairAlertStep::SelectToken1, .. } = state {
                                 let (token1, token2) = pair.split_once('/')
                                     .ok_or_else(|| RequestError::Api(ApiError::Unknown("Par inválido".to_string())))?;
@@ -305,7 +368,8 @@ impl TelegramBot {
                                 };
 
                                 self.db.save_user_state(message.chat.id.0, &new_state)
-                                    .map_err(Self::db_error_to_request_error)?;
+                                    .await
+                                    .map_err(|e| Self::db_error_to_request_error(e))?;
 
                                 bot.send_message(
                                     message.chat.id,
@@ -321,22 +385,17 @@ impl TelegramBot {
                             .map_err(|_| RequestError::Api(ApiError::Unknown("Diferencial inválido".to_string())))?;
 
                         if let Some(state) = self.db.get_user_state(message.chat.id.0)
-                            .map_err(Self::db_error_to_request_error)? {
+                            .await
+                            .map_err(|e| Self::db_error_to_request_error(e))? {
                             if let UserState::CreatingPairAlert { token1, token2, expected_ratio, .. } = state {
                                 if let (Some(token1), Some(token2), Some(ratio)) = (token1, token2, expected_ratio) {
                                     // Obtener usuario
-                                    let user = match self.get_user_by_chat_id(message.chat.id.0).await? {
-                                        Some(user) => user,
-                                        None => {
-                                            bot.send_message(message.chat.id, "❌ Debes registrarte primero usando /register").await?;
-                                            return Ok(());
-                                        }
-                                    };
+                                    let _user = self.get_user_by_chat_id(message.chat.id.0).await?;
 
                                     // Crear la alerta
                                     let alert = PriceAlert {
                                         id: None,
-                                        user_id: user.id,
+                                        user_id: _user.id,
                                         symbol: format!("{}/{}", &token1, &token2),
                                         alert_type: AlertType::PairDepeg {
                                             token1: token1.clone(),
@@ -344,13 +403,13 @@ impl TelegramBot {
                                             expected_ratio: ratio,
                                             differential: diff,
                                         },
-                                        is_active: true,
-                                        created_at: chrono::Utc::now().timestamp(),
+                                        created_at: Some(chrono::Utc::now().timestamp()),
                                         triggered_at: None,
+                                        is_active: true,
                                     };
 
                                     // Guardar la alerta
-                                    match self.db.save_alert(&alert) {
+                                    match self.db.save_alert(alert).await {
                                         Ok(_) => {
                                             bot.send_message(
                                                 message.chat.id,
@@ -365,7 +424,8 @@ impl TelegramBot {
                                             
                                             // Limpiar el estado del usuario
                                             self.db.clear_user_state(message.chat.id.0)
-                                                .map_err(Self::db_error_to_request_error)?;
+                                                .await
+                                                .map_err(|e| Self::db_error_to_request_error(e))?;
                                         }
                                         Err(e) => {
                                             error!("Error al crear alerta: {}", e);
@@ -382,33 +442,28 @@ impl TelegramBot {
                             .map_err(|_| RequestError::Api(ApiError::Unknown("Diferencial inválido".to_string())))?;
 
                         if let Some(state) = self.db.get_user_state(message.chat.id.0)
-                            .map_err(Self::db_error_to_request_error)? {
+                            .await
+                            .map_err(|e| Self::db_error_to_request_error(e))? {
                             if let UserState::CreatingDepegAlert { symbol, .. } = state {
                                 if let Some(symbol) = symbol {
-                                    let user = match self.get_user_by_chat_id(message.chat.id.0).await? {
-                                        Some(user) => user,
-                                        None => {
-                                            bot.send_message(message.chat.id, "❌ Debes registrarte primero usando /register").await?;
-                                            return Ok(());
-                                        }
-                                    };
+                                    let _user = self.get_user_by_chat_id(message.chat.id.0).await?;
 
                                     // Crear alerta de depeg
                                     let alert = PriceAlert {
                                         id: None,
-                                        user_id: user.id,
+                                        user_id: _user.id,
                                         symbol: symbol.clone(),
                                         alert_type: AlertType::Depeg {
                                             target_price: 1.0,  // Siempre $1 para stablecoins
                                             differential: diff,
                                             exchanges: vec!["binance".to_string(), "coinbase".to_string()]
                                         },
-                                        created_at: chrono::Utc::now().timestamp(),
+                                        created_at: Some(chrono::Utc::now().timestamp()),
                                         triggered_at: None,
                                         is_active: true,
                                     };
 
-                                    match self.db.save_alert(&alert) {
+                                    match self.db.save_alert(alert).await {
                                         Ok(_) => {
                                             bot.send_message(
                                                 message.chat.id,
@@ -421,7 +476,8 @@ impl TelegramBot {
                                             ).await?;
                                             
                                             self.db.clear_user_state(message.chat.id.0)
-                                                .map_err(Self::db_error_to_request_error)?;
+                                                .await
+                                                .map_err(|e| Self::db_error_to_request_error(e))?;
                                         }
                                         Err(e) => {
                                             error!("Error al crear alerta: {}", e);
@@ -450,16 +506,16 @@ impl TelegramBot {
         
         let auth = Auth::new(self.db.as_ref());
         
-        match auth.register_user(&username, &password) {
+        match auth.register_user(&username, &password).await {
             Ok(user) => {
-                if let Err(e) = self.db.update_user_telegram_chat_id(user.id, chat_id) {
+                if let Err(e) = self.db.update_user_telegram_chat_id(user.id, chat_id).await {
                     let error_msg = format!("Error al actualizar chat_id: {}", e);
                     error!("{}", error_msg);
                     bot.send_message(msg.chat.id, "Error al vincular cuenta con Telegram").await?;
                     return Ok(());
                 }
 
-                match self.db.create_api_key(user.id) {
+                match self.db.create_api_key(user.id).await {
                     Ok(api_key) => {
                         bot.send_message(msg.chat.id, format!(
                             "✅ Registro exitoso!\n\n\
@@ -495,13 +551,7 @@ impl TelegramBot {
         let chat_id = msg.chat.id.0;
         
         // Obtener usuario por chat_id
-        let user = match self.get_user_by_chat_id(chat_id).await? {
-            Some(user) => user,
-            None => {
-                bot.send_message(msg.chat.id, "❌ Debes registrarte primero usando /register").await?;
-                return Ok(());
-            }
-        };
+        let user = self.get_user_by_chat_id(chat_id).await?;
 
         // Validar condición
         let condition = match condition_str.to_lowercase().as_str() {
@@ -522,22 +572,36 @@ impl TelegramBot {
                 target_price: price,
                 condition,
             },
-            created_at: chrono::Utc::now().timestamp(),
+            created_at: Some(chrono::Utc::now().timestamp()),
             triggered_at: None,
             is_active: true,
         };
 
-        match self.db.save_alert(&alert) {
+        // Clonar los valores necesarios antes de mover alert
+        let symbol = alert.symbol.clone();
+        let target_price = if let AlertType::Price { target_price, .. } = alert.alert_type {
+            target_price
+        } else {
+            0.0
+        };
+        let condition = if let AlertType::Price { condition, .. } = &alert.alert_type {
+            condition.clone()
+        } else {
+            AlertCondition::Above
+        };
+
+        match self.db.save_alert(alert).await {
             Ok(_) => {
-                if let AlertType::Price { target_price, condition } = &alert.alert_type {
-                    bot.send_message(msg.chat.id, format!(
+                bot.send_message(
+                    msg.chat.id,
+                    format!(
                         "✅ Alerta creada exitosamente!\n\n\
                          Símbolo: {}\n\
                          Precio objetivo: ${:.2}\n\
                          Condición: {:?}",
-                        alert.symbol, target_price, condition
-                    )).await?;
-                }
+                        symbol, target_price, condition
+                    )
+                ).await?;
             }
             Err(e) => {
                 error!("Error al crear alerta: {}", e);
@@ -557,7 +621,8 @@ impl TelegramBot {
             exchanges: None,
         };
         self.db.save_user_state(msg.chat.id.0, &state)
-            .map_err(Self::db_error_to_request_error)?;
+            .await
+            .map_err(|e| Self::db_error_to_request_error(e))?;
         self.handle_depeg_alert_step(&bot, msg, &state).await?;
         Ok(())
     }
@@ -571,7 +636,8 @@ impl TelegramBot {
             differential: None,
         };
         self.db.save_user_state(msg.chat.id.0, &state)
-            .map_err(Self::db_error_to_request_error)?;
+            .await
+            .map_err(|e| Self::db_error_to_request_error(e))?;
         self.handle_pair_depeg_step(&bot, msg, &state).await?;
         Ok(())
     }
@@ -631,9 +697,12 @@ impl TelegramBot {
     }
 
     // Método auxiliar para obtener usuario por chat_id
-    async fn get_user_by_chat_id(&self, chat_id: i64) -> ResponseResult<Option<User>> {
-        self.db.get_user_by_telegram_id(chat_id)
-            .map_err(|e| RequestError::Api(ApiError::Unknown(e.to_string())))
+    async fn get_user_by_chat_id(&self, chat_id: i64) -> ResponseResult<User> {
+        match self.db.get_user_by_telegram_id(chat_id).await {
+            Ok(Some(user)) => Ok(user),
+            Ok(None) => Err(RequestError::Api(ApiError::Unknown("Usuario no encontrado".to_string()))),
+            Err(e) => Err(RequestError::Api(ApiError::Unknown(e.to_string())))
+        }
     }
 
     async fn handle_list_alerts(&self, bot: Bot, msg: Message) -> ResponseResult<()> {
@@ -641,16 +710,10 @@ impl TelegramBot {
         info!("Listando alertas para chat_id={}", chat_id);
 
         // Obtener usuario por chat_id
-        let user = match self.get_user_by_chat_id(chat_id).await? {
-            Some(user) => user,
-            None => {
-                bot.send_message(msg.chat.id, "❌ Debes registrarte primero usando /register").await?;
-                return Ok(());
-            }
-        };
+        let user = self.get_user_by_chat_id(chat_id).await?;
 
         // Obtener alertas del usuario
-        match self.db.get_user_alerts(user.id) {
+        match self.db.get_user_alerts(user.id).await {
             Ok(alerts) => {
                 if alerts.is_empty() {
                     bot.send_message(msg.chat.id, "No tienes alertas configuradas").await?;
@@ -729,16 +792,10 @@ impl TelegramBot {
         let chat_id = msg.chat.id.0;
         
         // Obtener usuario
-        let user = match self.get_user_by_chat_id(chat_id).await? {
-            Some(user) => user,
-            None => {
-                bot.send_message(msg.chat.id, "❌ Debes registrarte primero usando /register").await?;
-                return Ok(());
-            }
-        };
+        let user = self.get_user_by_chat_id(chat_id).await?;
 
         // Obtener alertas activas
-        match self.db.get_user_alerts(user.id) {
+        match self.db.get_user_alerts(user.id).await {
             Ok(alerts) if !alerts.is_empty() => {
                 let keyboard: Vec<Vec<InlineKeyboardButton>> = alerts.iter().map(|alert| {
                     let description = match &alert.alert_type {
@@ -776,7 +833,7 @@ impl TelegramBot {
         info!("Mostrando símbolos soportados");
         
         let symbols: Vec<String> = CONFIG.cryptocurrencies.iter()
-            .map(|(symbol, info)| format!("{} ({})", symbol, info.name))
+            .map(|symbol| symbol.clone())
             .collect();
 
         let response = format!(
@@ -950,7 +1007,8 @@ Para crear una alerta, usa /alert y sigue las instrucciones\."#;
     async fn handle_message(&self, bot: Bot, msg: Message) -> ResponseResult<()> {
         if let Some(text) = msg.text() {
             if let Some(state) = self.db.get_user_state(msg.chat.id.0)
-                .map_err(Self::db_error_to_request_error)? {
+                .await
+                .map_err(|e| Self::db_error_to_request_error(e))? {
                 match state {
                     UserState::CreatingPriceAlert { step: PriceAlertStep::EnterPrice, symbol, .. } => {
                         match text.parse::<f64>() {
@@ -962,7 +1020,8 @@ Para crear una alerta, usa /alert y sigue las instrucciones\."#;
                                     condition: None,
                                 };
                                 self.db.save_user_state(msg.chat.id.0, &new_state)
-                                    .map_err(Self::db_error_to_request_error)?;
+                                    .await
+                                    .map_err(|e| Self::db_error_to_request_error(e))?;
                                 self.handle_price_alert_step(&bot, msg, &new_state).await?;
                             }
                             Err(_) => {
@@ -984,7 +1043,8 @@ Para crear una alerta, usa /alert y sigue las instrucciones\."#;
                                     differential: None,
                                 };
                                 self.db.save_user_state(msg.chat.id.0, &new_state)
-                                    .map_err(Self::db_error_to_request_error)?;
+                                    .await
+                                    .map_err(|e| Self::db_error_to_request_error(e))?;
 
                                 let markup = InlineKeyboardMarkup::new([[
                                     InlineKeyboardButton::callback("0.5%", "pairdiff_0.5"),
@@ -1016,24 +1076,15 @@ Para crear una alerta, usa /alert y sigue las instrucciones\."#;
         Ok(())
     }
 
-    pub async fn run(self) {
-        let bot = Bot::new(std::env::var("TELEGRAM_BOT_TOKEN").expect("TELEGRAM_BOT_TOKEN must be set"));
-        
-        info!("Starting Telegram bot...");
-        
-        let bot_handler = Arc::new(self);
-        
-        let handler = {
-            let bot_handler1 = bot_handler.clone();
-            let bot_handler2 = bot_handler.clone();
-            let bot_handler3 = bot_handler.clone();
-            
-            dptree::entry()
-                .branch(
-                    Update::filter_message()
-                        .filter_command::<Command>()
-                        .endpoint(move |bot: Bot, msg: Message, cmd: Command| {
-                            let handler = bot_handler1.clone();
+    pub async fn run(&self) {
+        let handler = dptree::entry()
+            .branch(
+                Update::filter_message()
+                    .filter_command::<Command>()
+                    .endpoint({
+                        let bot_instance = self.clone();
+                        move |bot: Bot, msg: Message, cmd: Command| {
+                            let handler = bot_instance.clone();
                             async move {
                                 if let Err(e) = handler.handle_command(bot, msg, cmd).await {
                                     error!("Error manejando comando: {}", e);
@@ -1041,12 +1092,15 @@ Para crear una alerta, usa /alert y sigue las instrucciones\."#;
                                 }
                                 Ok(())
                             }
-                        })
-                )
-                .branch(
-                    Update::filter_message()
-                        .endpoint(move |bot: Bot, msg: Message| {
-                            let handler = bot_handler2.clone();
+                        }
+                    })
+            )
+            .branch(
+                Update::filter_message()
+                    .endpoint({
+                        let bot_instance = self.clone();
+                        move |bot: Bot, msg: Message| {
+                            let handler = bot_instance.clone();
                             async move {
                                 if let Err(e) = handler.handle_message(bot, msg).await {
                                     error!("Error manejando mensaje: {}", e);
@@ -1054,12 +1108,15 @@ Para crear una alerta, usa /alert y sigue las instrucciones\."#;
                                 }
                                 Ok(())
                             }
-                        })
-                )
-                .branch(
-                    Update::filter_callback_query()
-                        .endpoint(move |bot: Bot, q: CallbackQuery| {
-                            let handler = bot_handler3.clone();
+                        }
+                    })
+            )
+            .branch(
+                Update::filter_callback_query()
+                    .endpoint({
+                        let bot_instance = self.clone();
+                        move |bot: Bot, q: CallbackQuery| {
+                            let handler = bot_instance.clone();
                             async move {
                                 if let Err(e) = handler.handle_callback(bot, q).await {
                                     error!("Error manejando callback: {}", e);
@@ -1067,11 +1124,12 @@ Para crear una alerta, usa /alert y sigue las instrucciones\."#;
                                 }
                                 Ok(())
                             }
-                        })
-                )
-        };
+                        }
+                    })
+            );
 
-        Dispatcher::builder(bot, handler)
+        Dispatcher::builder(self.bot.clone(), handler)
+            .dependencies(dptree::deps![Arc::clone(&self.db), Arc::clone(&self.exchange_manager)])
             .enable_ctrlc_handler()
             .build()
             .dispatch()
@@ -1092,5 +1150,73 @@ Para crear una alerta, usa /alert y sigue las instrucciones\."#;
                 Err(Box::new(e))
             }
         }
+    }
+
+    pub async fn handle_price_alert(&self, msg: Message, args: Vec<String>) -> Result<(), BotError> {
+        match self.db.get_user_by_telegram_id(msg.chat.id.0).await {
+            Ok(Some(user)) => {
+                let alert = PriceAlert {
+                    id: None,
+                    user_id: user.id,
+                    symbol: args[0].clone(),
+                    alert_type: AlertType::Price {
+                        target_price: args[1].parse()?,
+                        condition: AlertCondition::Above,
+                    },
+                    created_at: Some(chrono::Utc::now().timestamp()),
+                    triggered_at: None,
+                    is_active: true,
+                };
+
+                // Clonar los valores necesarios antes de mover alert
+                let symbol = alert.symbol.clone();
+                let target_price = if let AlertType::Price { target_price, .. } = alert.alert_type {
+                    target_price
+                } else {
+                    0.0
+                };
+                let condition = if let AlertType::Price { condition, .. } = &alert.alert_type {
+                    condition.clone()
+                } else {
+                    AlertCondition::Above
+                };
+
+                match self.db.save_alert(alert).await {
+                    Ok(_) => {
+                        self.bot.send_message(
+                            msg.chat.id,
+                            format!(
+                                "✅ Alerta de precio creada exitosamente\n\n\
+                                 Símbolo: {}\n\
+                                 Precio objetivo: ${:.2}\n\
+                                 Condición: {:?}",
+                                symbol, target_price, condition
+                            )
+                        ).await?;
+                    }
+                    Err(e) => {
+                        error!("Error al guardar alerta: {}", e);
+                        self.bot.send_message(
+                            msg.chat.id,
+                            "❌ Error al crear alerta"
+                        ).await?;
+                    }
+                }
+            }
+            Ok(None) => {
+                self.bot.send_message(
+                    msg.chat.id,
+                    "❌ Usuario no encontrado"
+                ).await?;
+            }
+            Err(e) => {
+                error!("Error al buscar usuario: {}", e);
+                self.bot.send_message(
+                    msg.chat.id,
+                    "❌ Error interno del servidor"
+                ).await?;
+            }
+        }
+        Ok(())
     }
 } 

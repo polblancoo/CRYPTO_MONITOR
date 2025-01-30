@@ -1,8 +1,9 @@
-use axum::{Router, Extension};
-use std::sync::Arc;
+use axum::Router;
 use tower_http::cors::CorsLayer;
 use crate::Database;
+use crate::exchanges::ExchangeManager;
 use tokio::net::TcpListener;
+use std::sync::Arc;
 
 mod routes;
 mod handlers;
@@ -13,24 +14,28 @@ pub use middleware::logging;
 
 #[derive(Clone)]
 pub struct ApiState {
-    db: Arc<Database>,
+    pub db: Arc<Database>,
+    pub exchange_manager: Arc<ExchangeManager>,
 }
 
-pub async fn start_server(db: Arc<Database>, port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    // Configurar el estado compartido
-    let state = ApiState { db: db.clone() };
+pub async fn start_server(
+    db: Arc<Database>, 
+    exchange_manager: Arc<ExchangeManager>
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let state = ApiState {
+        db,
+        exchange_manager,
+    };
 
-    // Configurar CORS
     let cors = CorsLayer::permissive();
 
-    // Crear el router
     let app = Router::new()
-        .merge(routes::api_routes())
-        .layer(Extension(state))
+        .nest("/api", routes::api_routes())
+        .nest("/trade", routes::trading_routes())
+        .with_state(state)
         .layer(cors);
 
-    // Iniciar el servidor
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8080));
     println!("API escuchando en http://{}", addr);
     
     let listener = TcpListener::bind(addr).await?;

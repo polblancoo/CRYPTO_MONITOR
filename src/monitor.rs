@@ -4,8 +4,8 @@ use crate::{
     notify::NotificationService,
     db::Database,
 };
-use std::{error::Error, sync::Arc, time::Duration};
-use tokio::time;
+use std::{error::Error, sync::Arc};
+use tokio::time::{self, Duration};
 use tracing::{info, error};
 
 pub struct PriceMonitor {
@@ -46,33 +46,32 @@ impl PriceMonitor {
 
     async fn check_all_alerts(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         info!("Verificando alertas activas...");
-        let alerts = self.db.get_active_alerts()?;
+        let alerts = self.db.get_active_alerts().await?;
         info!("Encontradas {} alertas activas", alerts.len());
         
-        for alert in &alerts {
+        for alert in alerts {
             match &alert.alert_type {
                 AlertType::Price { target_price, condition } => {
                     info!("Evaluando alerta de precio: ID={}, Symbol={}, Target=${}, Condition={:?}", 
                         alert.id.unwrap_or(-1), alert.symbol, target_price, condition);
                     
                     if let Ok(price) = self.api.get_price(&alert.symbol).await {
-                        if self.should_trigger_alert(&price, alert) {
-                            if let Err(e) = self.send_alert_notification(alert, &price).await {
+                        if self.should_trigger_alert(&price, &alert) {
+                            if let Err(e) = self.send_alert_notification(&alert, &price).await {
                                 error!("Error al enviar notificación: {}", e);
                             }
-                            if let Err(e) = self.db.mark_alert_triggered(alert.id.unwrap()) {
+                            if let Err(e) = self.db.mark_alert_triggered(alert.id.unwrap()).await {
                                 error!("Error al marcar alerta como disparada: {}", e);
                             }
                         }
                     }
                 },
-                AlertType::Depeg { target_price, differential, exchanges } => {
+                AlertType::Depeg { target_price, exchanges, .. } => {
                     info!(
-                        "Evaluando alerta de depeg: ID={}, Symbol={}, Target=${}, Diff={}%", 
+                        "Evaluando alerta de depeg: ID={}, Symbol={}, Target=${}", 
                         alert.id.unwrap_or(-1), 
                         alert.symbol, 
-                        target_price, 
-                        differential
+                        target_price
                     );
                     
                     let mut prices = Vec::new();
@@ -85,28 +84,25 @@ impl PriceMonitor {
                     if !prices.is_empty() {
                         let max_price = prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
                         let min_price = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-                        let deviation = ((max_price - target_price).abs() / target_price) * 100.0;
                         
-                        if deviation > *differential {
-                            let trigger_price = if (max_price - target_price).abs() > (min_price - target_price).abs() {
-                                max_price
-                            } else {
-                                min_price
-                            };
-                            
-                            let crypto_price = CryptoPrice {
-                                symbol: alert.symbol.clone(),
-                                price: trigger_price,
-                                exchange: "multiple".to_string(),
-                                timestamp: chrono::Utc::now().timestamp(),
-                            };
-                            
-                            if let Err(e) = self.send_alert_notification(alert, &crypto_price).await {
-                                error!("Error al enviar notificación: {}", e);
-                            }
-                            if let Err(e) = self.db.mark_alert_triggered(alert.id.unwrap()) {
-                                error!("Error al marcar alerta como disparada: {}", e);
-                            }
+                        let trigger_price = if (max_price - target_price).abs() > (min_price - target_price).abs() {
+                            max_price
+                        } else {
+                            min_price
+                        };
+                        
+                        let crypto_price = CryptoPrice {
+                            symbol: alert.symbol.clone(),
+                            price: trigger_price,
+                            exchange: "multiple".to_string(),
+                            timestamp: chrono::Utc::now().timestamp(),
+                        };
+                        
+                        if let Err(e) = self.send_alert_notification(&alert, &crypto_price).await {
+                            error!("Error al enviar notificación: {}", e);
+                        }
+                        if let Err(e) = self.db.mark_alert_triggered(alert.id.unwrap()).await {
+                            error!("Error al marcar alerta como disparada: {}", e);
                         }
                     }
                 },
@@ -125,10 +121,10 @@ impl PriceMonitor {
                                     timestamp: chrono::Utc::now().timestamp(),
                                 };
                                 
-                                if let Err(e) = self.send_alert_notification(alert, &crypto_price).await {
+                                if let Err(e) = self.send_alert_notification(&alert, &crypto_price).await {
                                     error!("Error al enviar notificación: {}", e);
                                 }
-                                if let Err(e) = self.db.mark_alert_triggered(alert.id.unwrap()) {
+                                if let Err(e) = self.db.mark_alert_triggered(alert.id.unwrap()).await {
                                     error!("Error al marcar alerta como disparada: {}", e);
                                 }
                             }
@@ -147,17 +143,18 @@ impl PriceMonitor {
                 AlertCondition::Above => price.price > *target_price,
                 AlertCondition::Below => price.price < *target_price,
             },
-            AlertType::Depeg { target_price, differential: diff, .. } => {
+            AlertType::Depeg { target_price, .. } => {
                 let deviation = ((price.price - target_price) / target_price).abs() * 100.0;
-                deviation > *diff
+                deviation > 0.0
             },
             AlertType::PairDepeg { .. } => false, // Se maneja en check_pair_depeg
         }
     }
 
     async fn send_alert_notification(&self, alert: &PriceAlert, price: &CryptoPrice) -> Result<(), Box<dyn Error + Send + Sync>> {
-        let user = self.db.get_user_telegram_chat_id(alert.user_id)?
-            .ok_or_else(|| format!("No se encontró telegram_chat_id para el usuario {}", alert.user_id))?;
+        let user = self.db.get_user_by_telegram_id(alert.user_id)
+            .await?
+            .ok_or_else(|| format!("No se encontró usuario para el id {}", alert.user_id))?;
 
         let message = match &alert.alert_type {
             AlertType::Price { target_price, condition } => {
@@ -170,16 +167,14 @@ impl PriceMonitor {
                     alert.symbol, price.price, target_price, condition
                 )
             },
-            AlertType::Depeg { target_price, differential, exchanges } => {
+            AlertType::Depeg { target_price, exchanges, .. } => {
                 format!(
                     "🚨 ¡Alerta de Depeg!\n\n\
                      Símbolo: {}\n\
                      Precio Actual: ${:.2}\n\
                      Precio Objetivo: ${:.2}\n\
-                     Desviación: {:.2}%\n\
                      Exchanges: {}",
-                    alert.symbol, price.price, target_price, 
-                    ((price.price - target_price) / target_price).abs() * 100.0,
+                    alert.symbol, price.price, target_price,
                     exchanges.join(", ")
                 )
             },
@@ -198,14 +193,13 @@ impl PriceMonitor {
             }
         };
 
-        self.notification_service.send_alert(user, &message).await
+        self.notification_service.send_alert(user.telegram_chat_id.unwrap_or(0), &message).await
     }
 
     async fn check_depeg_alert(&self, alert: &PriceAlert) -> Result<bool, Box<dyn Error + Send + Sync>> {
-        if let AlertType::Depeg { target_price, differential: diff, exchanges } = &alert.alert_type {
+        if let AlertType::Depeg { target_price, exchanges, .. } = &alert.alert_type {
             let mut prices = Vec::new();
             
-            // Obtener precios de todos los exchanges especificados
             for exchange in exchanges {
                 if let Ok(price) = self.api.get_price_from_exchange(&alert.symbol, exchange).await {
                     prices.push(price.price);
@@ -216,13 +210,12 @@ impl PriceMonitor {
                 return Ok(false);
             }
 
-            // Calcular desviación máxima
             let max_price = prices.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
             let _min_price = prices.iter().fold(f64::INFINITY, |a, &b| a.min(b));
             
             let deviation = ((max_price - target_price).abs() / target_price) * 100.0;
             
-            Ok(deviation > *diff)
+            Ok(deviation > 0.0)
         } else {
             Ok(false)
         }

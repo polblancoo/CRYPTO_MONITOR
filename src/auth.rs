@@ -7,7 +7,7 @@ use argon2::password_hash::Error as ArgonError;
 
 #[derive(Debug)]
 pub enum AuthError {
-    DatabaseError(rusqlite::Error),
+    DatabaseError(tokio_rusqlite::Error),
     UserExists,
     InvalidCredentials,
     HashError(String),
@@ -46,9 +46,11 @@ impl<'a> Auth<'a> {
         Self { db }
     }
 
-    pub fn register_user(&self, username: &str, password: &str) -> Result<User, AuthError> {
+    pub async fn register_user(&self, username: &str, password: &str) -> Result<User, AuthError> {
         let password_hash = self.hash_password(password)?;
-        let user_id = self.db.create_user(username, &password_hash)
+        
+        let user_id = self.db.create_user(username.to_string(), password_hash.clone())
+            .await
             .map_err(|e| AuthError::DatabaseError(e))?;
         
         Ok(User {
@@ -63,8 +65,9 @@ impl<'a> Auth<'a> {
         })
     }
 
-    pub fn login(&self, username: &str, password: &str) -> Result<Option<User>, AuthError> {
+    pub async fn login(&self, username: &str, password: &str) -> Result<Option<User>, AuthError> {
         let user = self.db.get_user_by_username(username)
+            .await
             .map_err(|e| AuthError::DatabaseError(e))?;
 
         if let Some(user) = user {

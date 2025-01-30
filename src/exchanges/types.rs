@@ -1,12 +1,13 @@
+use super::ExchangeError;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use async_trait;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ExchangeCredentials {
     pub api_key: String,
     pub api_secret: String,
-    pub passphrase: Option<String>,  // Necesario para KuCoin
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -56,10 +57,9 @@ pub struct Balance {
     pub locked: Decimal,
 }
 
-// Trait común para todos los exchanges
 #[async_trait::async_trait]
 pub trait Exchange: Send + Sync {
-    async fn get_balance(&self, asset: &str) -> Result<Balance, ExchangeError>;
+    async fn get_balance(&self, asset: &str) -> Result<Vec<Balance>, ExchangeError>;
     
     async fn place_order(
         &self,
