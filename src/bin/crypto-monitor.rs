@@ -8,6 +8,7 @@ use crypto_monitor::{
     exchanges::ExchangeManager,
     crypto_api::CryptoAPI,
     notify::NotificationService,
+    config::Config,
 };
 use teloxide::Bot;
 use tracing::{info, error};
@@ -19,7 +20,7 @@ async fn main() {
     // Cargar variables de entorno
     dotenv().ok();
     
-    // Inicializar logging con más detalle
+    // Inicializar logging
     fmt()
         .with_env_filter(EnvFilter::from_default_env()
             .add_directive(tracing::Level::INFO.into()))
@@ -30,30 +31,24 @@ async fn main() {
         .with_line_number(true)
         .init();
 
-    info!("Iniciando Crypto Monitor...");
+    if let Err(e) = run().await {
+        error!("Error en la aplicación: {}", e);
+    }
+}
 
-    // Inicializar base de datos de manera asíncrona
+async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Inicializar base de datos
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "sqlite:crypto_monitor.db".to_string());
 
-    let db = match Database::new(&database_url).await {
-        Ok(db) => Arc::new(db),
-        Err(e) => {
-            error!("Error al inicializar la base de datos: {}", e);
-            return;
-        }
-    };
+    let db = Arc::new(Database::new(&database_url).await?);
 
     // Crear el exchange manager
-    let exchange_manager = Arc::new(
-        ExchangeManager::new()
-            .expect("Error al inicializar el exchange manager")
-    );
+    let exchange_manager = Arc::new(ExchangeManager::new()?);
 
     // Obtener token de Telegram
     let telegram_token = std::env::var("TELEGRAM_BOT_TOKEN")
         .expect("TELEGRAM_BOT_TOKEN debe estar configurado");
-    let bot = Bot::new(telegram_token);
 
     // Inicializar servicios necesarios
     let api = CryptoAPI::new(
@@ -61,10 +56,7 @@ async fn main() {
             .unwrap_or_default()
     );
 
-    let notification_service = NotificationService::new(
-        std::env::var("TELEGRAM_BOT_TOKEN")
-            .expect("TELEGRAM_BOT_TOKEN debe estar configurado")
-    );
+    let notification_service = NotificationService::new(telegram_token.clone());
 
     // Inicializar el monitor de precios
     let check_interval = std::env::var("CHECK_INTERVAL")
@@ -79,14 +71,12 @@ async fn main() {
         check_interval,
     );
 
-    // Inicializar el bot de Telegram con reintento automático
+    // Inicializar el bot de Telegram
     let telegram_bot = Arc::new(TelegramBot::new(
-        db.clone(), 
+        telegram_token,
+        db.clone(),
         exchange_manager.clone(),
-        bot.clone()
     ));
-
-    info!("Iniciando servicios...");
 
     // Crear un canal para señalización de cierre
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
@@ -136,11 +126,8 @@ async fn main() {
 
     // Cerrar todo ordenadamente
     info!("Iniciando cierre ordenado...");
-    
-    // Notificar a todas las tareas
     let _ = shutdown_tx.send(());
     
-    // Esperar a que todas las tareas terminen
     while let Some(res) = tasks.join_next().await {
         if let Err(e) = res {
             error!("Error al cerrar tarea: {}", e);
@@ -148,4 +135,5 @@ async fn main() {
     }
 
     info!("Servicios detenidos correctamente");
+    Ok(())
 } 

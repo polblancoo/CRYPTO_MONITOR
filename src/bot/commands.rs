@@ -1,32 +1,41 @@
+use teloxide::utils::command::BotCommands;
+
 #[derive(BotCommands, Clone, Debug)]
 #[command(
     rename_rule = "lowercase",
-    description = "Comandos disponibles:"
+    description = "Estos son los comandos disponibles:"
 )]
 pub enum Command {
-    // ... comandos existentes ...
-    
-    #[command(description = "conectar exchange - /connect <exchange> <api_key> <api_secret> [passphrase]")]
-    Connect { text: String },
-    
-    #[command(description = "comprar - /buy <exchange> <symbol> <quantity> [price]")]
-    Buy { text: String },
-    
-    #[command(description = "vender - /sell <exchange> <symbol> <quantity> [price]")]
-    Sell { text: String },
-    
-    #[command(description = "ver balance - /balance [exchange] [symbol]")]
-    Balance { text: String },
-    
-    #[command(description = "ver órdenes abiertas - /orders [exchange] [symbol]")]
-    Orders { text: String },
-    
-    #[command(description = "cancelar orden - /cancel <exchange> <order_id>")]
-    Cancel { text: String },
-    
-    #[command(description = "mostrar este mensaje")]
+    #[command(description = "muestra este mensaje")]
     Help,
-    
-    #[command(description = "crear orden - /order <symbol> <side> <type> <quantity> [price]")]
+    #[command(description = "inicia el bot")]
+    Start,
+    #[command(description = "registra tu usuario - /register <username> <password>")]
+    Register { text: String },
+    #[command(description = "crea una alerta de precio")]
+    Alert,
+    #[command(description = "crea alerta de depeg")]
+    Depeg,
+    #[command(description = "crea alerta de par")]
+    PairDepeg,
+    #[command(description = "lista tus alertas activas")]
+    Alerts,
+    #[command(description = "elimina una alerta")]
+    Delete,
+    #[command(description = "muestra los símbolos soportados")]
+    Symbols,
+    #[command(description = "Ver balance")]
+    Balance { text: String },
+    #[command(description = "Conectar exchange")]
+    Connect { text: String },
+    #[command(description = "Comprar")]
+    Buy { text: String },
+    #[command(description = "Vender")]
+    Sell { text: String },
+    #[command(description = "Ver órdenes")]
+    Orders { text: String },
+    #[command(description = "Crear orden")]
     Order(String),
+    #[command(description = "Cancelar orden - /cancel <order_id>")]
+    Cancel { text: String },
 } 

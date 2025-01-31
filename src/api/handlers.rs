@@ -215,7 +215,7 @@ pub async fn get_user_alerts(
     match state.db.verify_api_key(&api_key).await {
         Ok(Some(user)) => {
             match state.db.get_user_alerts(user.id).await {
-                Ok(alerts) => Json(alerts).into_response(),
+                Ok(alerts) => Json::<Vec<PriceAlert>>(alerts).into_response(),
                 Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             }
         }
@@ -472,6 +472,7 @@ pub async fn get_balance(
     Ok(Json(model_balances))
 }
 
+#[allow(dead_code)]
 pub async fn get_user_api_key(
     State(state): State<ApiState>,
     auth: BearerAuth,
@@ -487,6 +488,7 @@ pub async fn get_user_api_key(
     Ok(Json(api_key))
 }
 
+#[allow(dead_code)]
 pub async fn create_alert(
     State(state): State<ApiState>,
     auth: BearerAuth,
@@ -506,6 +508,7 @@ pub async fn create_alert(
     }
 }
 
+#[allow(dead_code)]
 pub async fn get_alerts(
     State(state): State<ApiState>,
     auth: BearerAuth,
@@ -513,7 +516,7 @@ pub async fn get_alerts(
     match state.db.verify_api_key(&auth.0).await {
         Ok(Some(user)) => {
             match state.db.get_user_alerts(user.id).await {
-                Ok(alerts) => Json(alerts).into_response(),
+                Ok(alerts) => Json::<Vec<PriceAlert>>(alerts).into_response(),
                 Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
             }
         }

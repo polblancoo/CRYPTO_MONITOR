@@ -13,6 +13,7 @@ pub use symbols::*;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::fmt;
+use rust_decimal::Decimal;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExchangeType {
@@ -99,6 +100,13 @@ impl ExchangeManager {
             .ok_or(ExchangeError::Exchange("Exchange no encontrado".into()))?;
             
         exchange.get_open_orders("").await
+    }
+
+    pub async fn get_price(&self, symbol: &str) -> Result<Decimal, ExchangeError> {
+        let binance = self.get_exchange(ExchangeType::Binance)
+            .ok_or_else(|| ExchangeError::Exchange("Exchange no encontrado".into()))?;
+            
+        binance.get_price(symbol).await
     }
 }
 

@@ -6,6 +6,7 @@ use crate::exchanges::binance_api::BinanceApi;
 use async_trait::async_trait;
 use chrono::Utc;
 use tracing::{info, error};
+use std::error::Error;
 
 pub struct BinanceExchange {
     api: BinanceApi,
@@ -19,6 +20,11 @@ impl BinanceExchange {
             api: BinanceApi::new(credentials.api_key, credentials.api_secret),
             account_info: OnceCell::new(),
         })
+    }
+
+    pub async fn get_price(&self, symbol: &str) -> Result<Decimal, Box<dyn Error + Send + Sync>> {
+        let price = self.api.get_price(symbol).await?;
+        Ok(price)
     }
 }
 
@@ -208,5 +214,11 @@ impl Exchange for BinanceExchange {
                 })
             })
             .collect()
+    }
+
+    async fn get_price(&self, symbol: &str) -> Result<Decimal, ExchangeError> {
+        self.api.get_price(symbol)
+            .await
+            .map_err(|e| ExchangeError::Exchange(e.to_string()))
     }
 } 

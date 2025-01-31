@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::error::Error;
 use tracing::{info, error};
+use rust_decimal::Decimal;
+use std::str::FromStr;
+use super::errors::ExchangeError;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -238,6 +241,23 @@ impl BinanceApi {
         ];
 
         self.send_signed_request("/api/v3/openOrders", &params).await
+    }
+
+    pub async fn get_price(&self, symbol: &str) -> Result<Decimal, ExchangeError> {
+        let endpoint = "/api/v3/ticker/price";
+        let params = vec![("symbol", symbol)];
+        
+        #[derive(Deserialize)]
+        struct PriceResponse {
+            price: String,
+        }
+
+        let response: PriceResponse = self.send_signed_request(endpoint, &params)
+            .await
+            .map_err(|e| ExchangeError::Network(e.to_string()))?;
+        
+        Decimal::from_str(&response.price)
+            .map_err(|e| ExchangeError::ParseError(e.to_string()))
     }
 }
 

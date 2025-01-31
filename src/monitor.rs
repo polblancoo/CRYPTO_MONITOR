@@ -108,8 +108,8 @@ impl PriceMonitor {
                 },
                 AlertType::PairDepeg { token1, token2, expected_ratio, differential } => {
                     // Implementación del manejo de alertas de par de tokens
-                    if let Ok(price1) = self.api.get_price(token1).await {
-                        if let Ok(price2) = self.api.get_price(token2).await {
+                    if let Ok(price1) = self.api.get_price(&token1).await {
+                        if let Ok(price2) = self.api.get_price(&token2).await {
                             let current_ratio = price1.price / price2.price;
                             let deviation = ((current_ratio - expected_ratio) / expected_ratio).abs() * 100.0;
                             
@@ -223,8 +223,8 @@ impl PriceMonitor {
 
     async fn check_pair_depeg(&self, alert: &PriceAlert) -> Result<bool, Box<dyn Error + Send + Sync>> {
         if let AlertType::PairDepeg { token1, token2, expected_ratio, differential } = &alert.alert_type {
-            let price1 = self.api.get_price(token1).await?;
-            let price2 = self.api.get_price(token2).await?;
+            let price1 = self.api.get_price(&token1).await?;
+            let price2 = self.api.get_price(&token2).await?;
             
             let current_ratio = price1.price / price2.price;
             let deviation = ((current_ratio - expected_ratio) / expected_ratio).abs() * 100.0;

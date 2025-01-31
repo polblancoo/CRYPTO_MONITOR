@@ -75,4 +75,6 @@ pub trait Exchange: Send + Sync {
     async fn get_order(&self, symbol: &str, order_id: &str) -> Result<Order, ExchangeError>;
     
     async fn get_open_orders(&self, symbol: &str) -> Result<Vec<Order>, ExchangeError>;
+    
+    async fn get_price(&self, symbol: &str) -> Result<Decimal, ExchangeError>;
 } 

@@ -14,6 +14,7 @@ use crate::{
     },
     db::Database,
     bot::TelegramBot,
+    Auth,
 };
 use rust_decimal::Decimal;
 use std::{sync::Arc, str::FromStr};
@@ -61,40 +62,40 @@ pub async fn handle_help(bot: Bot, msg: Message) -> ResponseResult<()> {
          ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\
          📋 *COMANDOS BÁSICOS*\n\
          ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\
-         `/help` \\- Ver este menú\n\
-         `/start` \\- Iniciar el bot\n\
+         [/help] \\- Ver este menú\n\
+         [/start] \\- Iniciar el bot\n\
          \n\
          ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\
          💹 *TRADING EN BINANCE*\n\
          ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\
-         `/balance` \\- Ver balance de la cuenta\n\
-         `/order` \\- Crear orden de trading\n\
-         `/orders` \\- Ver órdenes abiertas\n\
-         `/cancel` \\- Cancelar una orden\n\
-         `/symbols` \\- Ver pares disponibles\n\
+         [/balance] \\- Ver balance de la cuenta\n\
+         [/order] \\- Crear orden de trading\n\
+         [/orders] \\- Ver órdenes abiertas\n\
+         [/cancel] \\- Cancelar una orden\n\
+         [/symbols] \\- Ver pares disponibles\n\
          \n\
          ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\
          ⚠️ *SISTEMA DE ALERTAS*\n\
          ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\
-         `/alert` \\- Crear alerta de precio\n\
-         `/depeg` \\- Alerta de depeg stablecoin\n\
-         `/pairdepeg` \\- Alerta de par\n\
-         `/alerts` \\- Ver alertas activas\n\
-         `/delete` \\- Eliminar una alerta\n\
+         [/alert] \\- Crear alerta de precio\n\
+         [/depeg] \\- Alerta de depeg stablecoin\n\
+         [/pairdepeg] \\- Alerta de par\n\
+         [/alerts] \\- Ver alertas activas\n\
+         [/delete] \\- Eliminar una alerta\n\
          \n\
          ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\
          🔐 *CONFIGURACIÓN*\n\
          ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\
-         `/register` \\- Registrar usuario\n\
+         [/register] \\- Registrar usuario\n\
          \n\
          ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\
          ℹ️ *INFORMACIÓN*\n\
          ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n\
-         • Para más detalles sobre un comando,\n\
+         • Para más detalles sobre un comando,\n
            usa: `<comando> help`\n\
-           Ejemplo: `/order help`\n\
+           Ejemplo: [/order help]\n\
          \n\
-         • Pares soportados: `/symbols`\n\
+         • Pares soportados: [/symbols]\n\
          • Estado: Monitoreando {} pares\n\
          • Intervalo: {} segundos",
         crate::exchanges::get_all_pairs().len(),
@@ -257,8 +258,6 @@ pub async fn handle_order(bot: Bot, msg: Message, text: String, exchange_manager
 }
 
 pub async fn handle_orders(bot: Bot, msg: Message, exchange_manager: Arc<ExchangeManager>) -> ResponseResult<()> {
-    info!("Obteniendo órdenes abiertas...");
-    
     match exchange_manager.get_open_orders(ExchangeType::Binance).await {
         Ok(orders) => {
             if orders.is_empty() {
@@ -266,18 +265,24 @@ pub async fn handle_orders(bot: Bot, msg: Message, exchange_manager: Arc<Exchang
                 return Ok(());
             }
 
-            let mut message = String::from("*Órdenes Abiertas*\\n\\n");
+            let mut message = String::from("*Órdenes Abiertas:*\n\n");
             for order in orders {
                 message.push_str(&format!(
-                    "ID: `{}`\\n\
-                     Symbol: `{}`\\n\
-                     Side: `{:?}`\\n\
-                     Type: `{:?}`\\n\
-                     Quantity: `{}`\\n\
-                     Price: `{}`\\n\
-                     Status: `{:?}`\\n\\n",
-                    order.id, order.symbol, order.side, order.order_type,
-                    order.quantity, order.price.unwrap_or_default(), order.status
+                    "ID: `{}`\n\
+                     Símbolo: `{}`\n\
+                     Tipo: `{:?}`\n\
+                     Lado: `{:?}`\n\
+                     Cantidad: `{}`\n\
+                     Precio: `{}`\n\
+                     \\[ [Cancelar](/cancel_{}) \\]\n\
+                     \\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\-\\n\n",
+                    order.id,
+                    order.symbol,
+                    order.order_type,
+                    order.side,
+                    order.quantity,
+                    order.price.map_or("Mercado".into(), |p| p.to_string()),
+                    order.id
                 ));
             }
 
@@ -289,30 +294,43 @@ pub async fn handle_orders(bot: Bot, msg: Message, exchange_manager: Arc<Exchang
             error!("Error al obtener órdenes: {}", e);
             bot.send_message(
                 msg.chat.id,
-                format!("❌ Error al obtener órdenes: {}", e)
+                "❌ Error al obtener órdenes abiertas"
             ).await?;
         }
     }
-
     Ok(())
 }
 
-pub async fn handle_cancel(bot: Bot, msg: Message, order_id: String, exchange_manager: Arc<ExchangeManager>) -> ResponseResult<()> {
-    match exchange_manager.cancel_order(ExchangeType::Binance, &order_id).await {
-        Ok(_) => {
+pub async fn handle_cancel(bot: Bot, msg: Message, text: String, exchange_manager: Arc<ExchangeManager>) -> ResponseResult<()> {
+    let order_id = text.trim().trim_start_matches("_");
+    if order_id.is_empty() {
+        // Si no se proporciona ID, mostrar las órdenes abiertas
+        return handle_orders(bot, msg, exchange_manager).await;
+    }
+
+    match exchange_manager.cancel_order(ExchangeType::Binance, order_id).await {
+        Ok(()) => {
             bot.send_message(
                 msg.chat.id,
-                format!("✅ Orden {} cancelada", order_id)
+                format!("✅ Orden {} cancelada exitosamente", order_id)
             ).await?;
         }
         Err(e) => {
+            error!("Error al cancelar orden: {}", e);
             bot.send_message(
                 msg.chat.id,
                 format!("❌ Error al cancelar orden: {}", e)
             ).await?;
+            return Ok(());
         }
     }
 
+    // Esperar un momento antes de mostrar las órdenes actualizadas
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // Mostrar las órdenes restantes
+    handle_orders(bot, msg, exchange_manager).await?;
+    
     Ok(())
 }
 
@@ -465,6 +483,104 @@ pub async fn handle_order_help(bot: Bot, msg: Message) -> ResponseResult<()> {
     Ok(())
 }
 
+pub async fn handle_sell(
+    bot: Bot,
+    msg: Message,
+    db: Arc<Database>,
+    exchange_manager: Arc<ExchangeManager>,
+    args: String
+) -> ResponseResult<()> {
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    if parts.len() < 2 {
+        bot.send_message(
+            msg.chat.id,
+            "❌ Uso: /sell <symbol> <quantity> [price]"
+        ).await?;
+        return Ok(());
+    }
+
+    let symbol = parts[0].to_uppercase();
+    let quantity = match parts[1].parse::<Decimal>() {
+        Ok(q) => q,
+        Err(_) => {
+            bot.send_message(msg.chat.id, "❌ Cantidad inválida").await?;
+            return Ok(());
+        }
+    };
+
+    // Obtener el precio actual del mercado
+    let current_price = match exchange_manager.get_price(&symbol).await {
+        Ok(price) => price,
+        Err(e) => {
+            error!("Error al obtener precio: {}", e);
+            bot.send_message(
+                msg.chat.id,
+                "❌ Error al obtener el precio actual"
+            ).await?;
+            return Ok(());
+        }
+    };
+
+    // Calcular el valor total de la orden
+    let total_value = quantity * current_price;
+    
+    // Validar el valor mínimo (10 USDT para Binance)
+    if total_value < Decimal::from(10) {
+        bot.send_message(
+            msg.chat.id,
+            format!(
+                "❌ El valor total de la orden ({} USDT) es menor que el mínimo permitido (10 USDT)",
+                total_value
+            )
+        ).await?;
+        return Ok(());
+    }
+
+    let price = parts.get(2).and_then(|p| p.parse::<Decimal>().ok());
+
+    let order_request = OrderRequest {
+        symbol,
+        side: OrderSide::Sell,
+        order_type: if price.is_some() { OrderType::Limit } else { OrderType::Market },
+        quantity,
+        price,
+    };
+
+    if let Ok(_user) = db.get_user_by_telegram_id(msg.chat.id.0).await {
+        match exchange_manager.execute_order(ExchangeType::Binance, order_request).await {
+            Ok(order) => {
+                bot.send_message(
+                    msg.chat.id,
+                    format!(
+                        "✅ Orden de venta creada exitosamente!\n\
+                         ID: {}\n\
+                         Símbolo: {}\n\
+                         Tipo: {}\n\
+                         Cantidad: {}\n\
+                         Precio: {}\n\
+                         Valor Total: {} USDT",
+                        order.id,
+                        order.symbol,
+                        format!("{:?}", order.order_type),
+                        order.quantity,
+                        order.price.map_or("Mercado".into(), |p| p.to_string()),
+                        total_value
+                    )
+                ).await?;
+            }
+            Err(e) => {
+                error!("Error al crear orden: {}", e);
+                bot.send_message(
+                    msg.chat.id,
+                    format!("❌ Error al crear orden: {}", e)
+                ).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 impl TelegramBot {
     async fn handle_connect(&self, bot: Bot, msg: Message, args: String) -> ResponseResult<()> {
         let parts: Vec<&str> = args.split_whitespace().collect();
@@ -595,4 +711,75 @@ impl TelegramBot {
     }
 
     // Similar para sell, balance, orders y cancel...
+}
+
+pub async fn handle_register(bot: Bot, msg: Message, db: Arc<Database>, text: String) -> ResponseResult<()> {
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    if parts.len() != 2 {
+        bot.send_message(msg.chat.id, "Uso: /register <username> <password>").await?;
+        return Ok(());
+    }
+    
+    let username = parts[0];
+    let password = parts[1];
+    
+    let auth = Auth::new(db.as_ref());
+    match auth.register_user(username, password).await {
+        Ok(_) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("✅ Usuario {} registrado exitosamente!", username)
+            ).await?;
+        }
+        Err(e) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("❌ Error al registrar usuario: {}", e)
+            ).await?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn handle_alert_creation(bot: Bot, msg: Message) -> ResponseResult<()> {
+    bot.send_message(
+        msg.chat.id,
+        "Por favor selecciona el tipo de alerta que deseas crear:\n\
+         /price - Alerta de precio\n\
+         /depeg - Alerta de depeg\n\
+         /pair - Alerta de par"
+    ).await?;
+    Ok(())
+}
+
+pub async fn handle_depeg(bot: Bot, msg: Message) -> ResponseResult<()> {
+    bot.send_message(
+        msg.chat.id,
+        "Selecciona la stablecoin a monitorear:"
+    ).await?;
+    Ok(())
+}
+
+pub async fn handle_pair_depeg(bot: Bot, msg: Message) -> ResponseResult<()> {
+    bot.send_message(
+        msg.chat.id,
+        "Selecciona el par de tokens a monitorear:"
+    ).await?;
+    Ok(())
+}
+
+pub async fn handle_list_alerts(bot: Bot, msg: Message) -> ResponseResult<()> {
+    bot.send_message(
+        msg.chat.id,
+        "Aquí están tus alertas activas:"
+    ).await?;
+    Ok(())
+}
+
+pub async fn handle_delete_alert(bot: Bot, msg: Message) -> ResponseResult<()> {
+    bot.send_message(
+        msg.chat.id,
+        "Selecciona la alerta que deseas eliminar:"
+    ).await?;
+    Ok(())
 } 
