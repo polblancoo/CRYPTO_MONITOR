@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use rusqlite::{types::{FromSql, FromSqlResult, ValueRef, ToSql, ToSqlOutput}, Result as SqliteResult};
 use rust_decimal::Decimal;
 use chrono::{DateTime, Utc};
+use std::fmt;
+use std::str::FromStr;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct User {
@@ -41,10 +43,24 @@ pub struct PriceAlert {
     pub id: Option<i64>,
     pub user_id: i64,
     pub symbol: String,
-    pub alert_type: AlertType,
-    pub created_at: Option<i64>,
-    pub triggered_at: Option<i64>,
-    pub is_active: bool,
+    pub target_price: f64,
+    pub condition: AlertCondition,
+    pub created_at: i64,
+    pub triggered: bool,
+}
+
+impl PriceAlert {
+    pub fn new(id: Option<i64>, user_id: i64, symbol: String, target_price: f64, condition: AlertCondition) -> Self {
+        Self {
+            id,
+            user_id,
+            symbol,
+            target_price,
+            condition,
+            created_at: chrono::Utc::now().timestamp(),
+            triggered: false,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,12 +80,33 @@ pub enum AlertCondition {
     Below,
 }
 
+impl FromStr for AlertCondition {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "above" => Ok(AlertCondition::Above),
+            "below" => Ok(AlertCondition::Below),
+            _ => Err(format!("Invalid condition: {}", s))
+        }
+    }
+}
+
+impl fmt::Display for AlertCondition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AlertCondition::Above => write!(f, "above"),
+            AlertCondition::Below => write!(f, "below"),
+        }
+    }
+}
+
 impl FromSql for AlertCondition {
     fn column_result(value: ValueRef<'_>) -> FromSqlResult<Self> {
-        let text = value.as_str()?;
-        match text {
-            "Above" => Ok(AlertCondition::Above),
-            "Below" => Ok(AlertCondition::Below),
+        let text = value.as_str()?.to_lowercase();
+        match text.as_str() {
+            "above" => Ok(AlertCondition::Above),
+            "below" => Ok(AlertCondition::Below),
             _ => Err(rusqlite::types::FromSqlError::InvalidType),
         }
     }
@@ -77,10 +114,7 @@ impl FromSql for AlertCondition {
 
 impl ToSql for AlertCondition {
     fn to_sql(&self) -> SqliteResult<ToSqlOutput<'_>> {
-        Ok(ToSqlOutput::from(match self {
-            AlertCondition::Above => "Above",
-            AlertCondition::Below => "Below",
-        }))
+        Ok(ToSqlOutput::from(self.to_string()))
     }
 }
 
@@ -169,7 +203,7 @@ pub struct OrderRequest {
     pub price: Option<Decimal>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Order {
     pub id: String,
     pub symbol: String,

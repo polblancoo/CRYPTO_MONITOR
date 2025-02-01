@@ -23,7 +23,7 @@ rusqlite = { version = "0.30", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 argon2 = { version = "0.5", features = ["password-hash"] }
 rand = { version = "0.8", features = ["std_rng"] }
-axum = { version = "0.7", features = ["json", "tokio"] }
+axum = { version = "0.7", features = ["json", "tokio", "macros"] }
 axum-macros = "0.3"
 axum-extra = { version = "0.9", features = ["typed-header"] }
 tower = { version = "0.4", features = ["util"] }

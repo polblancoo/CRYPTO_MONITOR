@@ -1,6 +1,7 @@
 use std::error::Error;
-use teloxide::{prelude::*, types::ChatId};
+use teloxide::{prelude::*, types::ChatId, Bot};
 use tracing::{info, error, debug};
+use tokio::time::{sleep, Duration};
 
 pub struct NotificationService {
     bot: Bot,
@@ -29,35 +30,71 @@ impl NotificationService {
         let chat_id = ChatId(user_id);
         info!("Intentando enviar mensaje a chat_id: {}", user_id);
 
+        // Escapar caracteres especiales para MarkdownV2
+        let formatted_message = escape_markdown(message);
+
         // Intentar enviar el mensaje
-        match self.bot.send_message(chat_id, message).await {
-            Ok(message) => {
-                info!("Notificación enviada exitosamente");
-                debug!("Message ID: {}", message.id);
-                Ok(())
+        match self.bot.send_message(chat_id, formatted_message)
+            .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+            .await {
+                Ok(_) => Ok(()),
+                Err(e) => Err(Box::new(e) as Box<dyn Error + Send + Sync>)
             }
-            Err(e) => {
-                error!("Error detallado al enviar notificación:");
-                error!("  Tipo de error: {:?}", e);
-                error!("  Descripción: {}", e);
-                error!("  Chat ID: {}", user_id);
-                Err(Box::new(e))
-            }
-        }
     }
 
-    // Método para verificar el estado del bot
     pub async fn verify_bot(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        info!("Verificando estado del bot");
-        match self.bot.get_me().await {
-            Ok(me) => {
-                info!("Bot verificado: @{}", me.username());
-                Ok(())
-            }
-            Err(e) => {
-                error!("Error al verificar bot: {}", e);
-                Err(Box::new(e))
+        const MAX_RETRIES: u32 = 3;
+        const INITIAL_RETRY_DELAY: u64 = 5;
+        const MAX_RETRY_DELAY: u64 = 30;
+
+        let mut retry_count = 0;
+        loop {
+            match self.bot.get_me().await {
+                Ok(me) => {
+                    info!("Bot verificado: @{}", me.username());
+                    return Ok(());
+                }
+                Err(e) => {
+                    retry_count += 1;
+                    if retry_count >= MAX_RETRIES {
+                        error!("Error al verificar bot después de {} intentos: {}", MAX_RETRIES, e);
+                        return Err(Box::new(e));
+                    }
+
+                    let delay = (INITIAL_RETRY_DELAY * 2u64.pow(retry_count - 1))
+                        .min(MAX_RETRY_DELAY);
+                    
+                    error!(
+                        "Error al verificar bot (intento {}/{}): {}. Reintentando en {} segundos...",
+                        retry_count, MAX_RETRIES, e, delay
+                    );
+                    sleep(Duration::from_secs(delay)).await;
+                }
             }
         }
     }
+}
+
+fn escape_markdown(text: &str) -> String {
+    text.replace(".", "\\.")
+        .replace("-", "\\-")
+        .replace("(", "\\(")
+        .replace(")", "\\)")
+        .replace("!", "\\!")
+        .replace(">", "\\>")
+        .replace("<", "\\<")
+        .replace("+", "\\+")
+        .replace("$", "\\$")
+        .replace("%", "\\%")
+        .replace("#", "\\#")
+        .replace("{", "\\{")
+        .replace("}", "\\}")
+        .replace("=", "\\=")
+        .replace("|", "\\|")
+        .replace("~", "\\~")
+        .replace("`", "\\`")
+        .replace("*", "\\*")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+        .replace("_", "\\_")
 } 

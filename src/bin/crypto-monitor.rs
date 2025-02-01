@@ -5,18 +5,21 @@ use crypto_monitor::{
     db::Database,
     bot::TelegramBot,
     monitor::PriceMonitor,
-    exchanges::ExchangeManager,
+    exchanges::{ExchangeManager, ExchangeError},
     crypto_api::CryptoAPI,
     notify::NotificationService,
-    config::Config,
+    config::AppConfig,
 };
 use teloxide::Bot;
 use tracing::{info, error};
 use tracing_subscriber::{fmt, EnvFilter};
 use std::time::Duration;
+use std::time::Instant;
+use tokio::time::sleep;
+use tokio::select;
 
 #[tokio::main(worker_threads = 4)]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Cargar variables de entorno
     dotenv().ok();
     
@@ -31,109 +34,73 @@ async fn main() {
         .with_line_number(true)
         .init();
 
-    if let Err(e) = run().await {
-        error!("Error en la aplicación: {}", e);
-    }
-}
-
-async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Inicializar base de datos
+    // Inicializar componentes
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "sqlite:crypto_monitor.db".to_string());
-
+    
     let db = Arc::new(Database::new(&database_url).await?);
-
-    // Crear el exchange manager
+    
+    // Obtener API key de CoinGecko
+    let coingecko_api_key = std::env::var("COINGECKO_API_KEY")
+        .expect("COINGECKO_API_KEY debe estar configurado");
+    
     let exchange_manager = Arc::new(ExchangeManager::new()?);
-
-    // Obtener token de Telegram
-    let telegram_token = std::env::var("TELEGRAM_BOT_TOKEN")
+    let crypto_api = CryptoAPI::new(coingecko_api_key);
+    
+    let bot_token = std::env::var("TELEGRAM_BOT_TOKEN")
         .expect("TELEGRAM_BOT_TOKEN debe estar configurado");
-
-    // Inicializar servicios necesarios
-    let api = CryptoAPI::new(
-        std::env::var("COINGECKO_API_KEY")
-            .unwrap_or_default()
-    );
-
-    let notification_service = NotificationService::new(telegram_token.clone());
-
-    // Inicializar el monitor de precios
-    let check_interval = std::env::var("CHECK_INTERVAL")
-        .unwrap_or_else(|_| "60".to_string())
-        .parse::<u64>()
-        .unwrap_or(60);
-
-    let monitor = PriceMonitor::new(
-        api,
+    
+    let notification_service = NotificationService::new(bot_token.clone());
+    
+    // Crear monitor de precios
+    let monitor = Arc::new(PriceMonitor::new(
+        crypto_api,
         notification_service,
         db.clone(),
-        check_interval,
-    );
+        60, // intervalo en segundos
+    ));
 
-    // Inicializar el bot de Telegram
-    let telegram_bot = Arc::new(TelegramBot::new(
-        telegram_token,
+    // Crear bot de Telegram
+    let bot = Arc::new(TelegramBot::new(
+        bot_token,
         db.clone(),
         exchange_manager.clone(),
     ));
 
-    // Crear un canal para señalización de cierre
-    let (shutdown_tx, _) = broadcast::channel::<()>(1);
-    let mut tasks = JoinSet::new();
-
-    // Spawn del bot con reintento
-    {
-        let mut rx = shutdown_tx.subscribe();
-        let bot = Arc::clone(&telegram_bot);
-        tasks.spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = bot.run() => {
-                        error!("Bot detenido, reintentando en 5 segundos...");
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                    }
-                    _ = rx.recv() => {
-                        info!("Bot recibió señal de cierre");
-                        break;
-                    }
-                }
+    // Ejecutar bot y monitor en paralelo
+    let monitor_handle = {
+        let monitor = monitor.clone();
+        tokio::spawn(async move {
+            if let Err(e) = monitor.start().await {
+                error!("Error en el monitor: {}", e);
             }
-        });
-    }
+        })
+    };
 
-    // Spawn del monitor
-    {
-        let mut rx = shutdown_tx.subscribe();
-        tasks.spawn(async move {
-            tokio::select! {
-                result = monitor.start() => {
-                    if let Err(e) = result {
-                        error!("Error en el monitor: {}", e);
-                    }
-                }
-                _ = rx.recv() => info!("Monitor recibió señal de cierre"),
+    let bot_handle = {
+        let bot = bot.clone();
+        tokio::spawn(async move {
+            if let Err(e) = bot.start().await {
+                error!("Error en el bot: {}", e);
             }
-        });
-    }
+        })
+    };
 
-    // Esperar señal de cierre
-    tokio::select! {
-        _ = signal::ctrl_c() => {
-            info!("Recibida señal de interrupción");
+    // Esperar a que ambos terminen o manejar errores
+    select! {
+        result = monitor_handle => {
+            match result {
+                Ok(_) => info!("Monitor terminado correctamente"),
+                Err(e) => error!("Error en el monitor: {}", e),
+            }
+        }
+        result = bot_handle => {
+            match result {
+                Ok(_) => info!("Bot terminado correctamente"),
+                Err(e) => error!("Error en el bot: {}", e),
+            }
         }
     }
 
-    // Cerrar todo ordenadamente
-    info!("Iniciando cierre ordenado...");
-    let _ = shutdown_tx.send(());
-    
-    while let Some(res) = tasks.join_next().await {
-        if let Err(e) = res {
-            error!("Error al cerrar tarea: {}", e);
-        }
-    }
-
-    info!("Servicios detenidos correctamente");
     Ok(())
 } 

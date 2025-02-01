@@ -4,7 +4,7 @@ use std::{error::Error, time::Duration, collections::HashMap};
 use serde::Deserialize;
 use tokio::time::sleep;
 use tracing::{info, error};
-use crate::config::CONFIG;
+use crate::config::crypto_config::CRYPTO_CONFIG;
 
 pub struct CryptoAPI {
     client: Client,
@@ -48,14 +48,40 @@ impl CryptoAPI {
         Self {
             client: Client::new(),
             api_key,
-            symbol_to_id: HashMap::new(), // Simplificado por ahora
-            supported_exchanges: CONFIG.exchanges.clone(),
+            symbol_to_id: HashMap::new(),
+            supported_exchanges: Vec::new(),
         }
     }
 
     pub async fn get_price(&self, symbol: &str) -> Result<CryptoPrice, Box<dyn Error + Send + Sync>> {
-        // Obtener precio del exchange por defecto (binance)
-        self.get_price_from_exchange(symbol, "binance").await
+        let coin_id = CRYPTO_CONFIG.cryptocurrencies
+            .get(symbol)
+            .map(|info| info.coingecko_id.clone())
+            .ok_or_else(|| format!("Token no soportado: {}", symbol))?;
+
+        let url = format!(
+            "https://api.coingecko.com/api/v3/simple/price?ids={}&vs_currencies=usd&x_cg_demo_api_key={}",
+            coin_id,
+            self.api_key
+        );
+
+        let response = self.client.get(&url)
+            .send()
+            .await?
+            .json::<HashMap<String, HashMap<String, f64>>>()
+            .await?;
+
+        let price = response
+            .get(&coin_id)
+            .and_then(|prices| prices.get("usd"))
+            .ok_or_else(|| format!("No se pudo obtener el precio para {}", symbol))?;
+
+        Ok(CryptoPrice {
+            symbol: symbol.to_string(),
+            price: *price,
+            exchange: "coingecko".to_string(),
+            timestamp: chrono::Utc::now().timestamp(),
+        })
     }
 
     pub async fn get_price_from_exchange(&self, symbol: &str, exchange: &str) -> Result<CryptoPrice, Box<dyn Error + Send + Sync>> {
@@ -153,16 +179,31 @@ impl CryptoAPI {
     pub fn supported_exchanges(&self) -> Vec<String> {
         self.supported_exchanges.clone()
     }
+
+    #[cfg(test)]
+    pub fn get_supported_symbols() -> Vec<String> {
+        CRYPTO_CONFIG.cryptocurrencies.keys().cloned().collect()
+    }
+
+    #[cfg(test)]
+    pub fn get_test_instance() -> Self {
+        Self {
+            client: Client::new(),
+            api_key: "test".to_string(),
+            symbol_to_id: HashMap::new(),
+            supported_exchanges: Vec::new(),
+        }
+    }
 }
 
 pub async fn get_supported_coins() -> Result<Vec<CoinInfo>, Box<dyn Error>> {
     let mut coins = Vec::new();
     
-    for symbol in &CONFIG.cryptocurrencies {
+    for (symbol, info) in CRYPTO_CONFIG.cryptocurrencies.iter() {
         coins.push(CoinInfo {
             symbol: symbol.clone(),
-            name: symbol.clone(),
-            supported_exchanges: CONFIG.exchanges.clone(),
+            name: info.name.clone(),
+            supported_exchanges: Vec::new(), // O definir una lista de exchanges soportados
         });
     }
     

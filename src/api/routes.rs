@@ -33,4 +33,10 @@ pub fn trading_routes() -> Router<ApiState> {
         .route("/orders", get(handlers::get_orders))
         .route("/orders/:order_id", delete(handlers::cancel_order))
         .route("/balance", get(handlers::get_balance))
+}
+
+pub fn price_routes() -> Router<ApiState> {
+    Router::new()
+        .route("/alerts/price", post(handlers::create_price_alert))
+        // ... otras rutas ...
 } 

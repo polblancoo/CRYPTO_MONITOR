@@ -7,43 +7,25 @@ pub mod monitor;
 pub mod notify;
 pub mod timer;
 pub mod bot;
-pub mod config;
 pub mod exchanges;
+pub mod config;
 
-pub use crate::auth::Auth;
-pub use crate::db::Database;
-pub use crate::models::*;
-pub use crate::crypto_api::CryptoAPI;
-pub use crate::monitor::PriceMonitor;
-pub use crate::notify::NotificationService;
+pub use auth::Auth;
+pub use db::Database;
+pub use models::*;
+pub use crypto_api::CryptoAPI;
+pub use monitor::PriceMonitor;
+pub use notify::NotificationService;
+pub use config::AppConfig;
+pub use config::crypto_config::*;
 
-use dotenv::dotenv;
-use std::env;
-use std::error::Error;
+// Re-exportar AlertCondition
+pub use models::AlertCondition;
+
 use std::sync::Arc;
 use crate::exchanges::ExchangeManager;
 
-pub struct Config {
-    pub database_url: String,
-    pub coingecko_api_key: String,
-    pub telegram_token: String,
-    pub check_interval: u64,
-}
-
-impl Config {
-    pub fn new() -> Result<Self, Box<dyn Error + Send + Sync>> {
-        dotenv().ok();
-
-        Ok(Self {
-            database_url: env::var("DATABASE_URL")?,
-            coingecko_api_key: env::var("COINGECKO_API_KEY")?,
-            telegram_token: env::var("TELEGRAM_BOT_TOKEN")?,
-            check_interval: env::var("CHECK_INTERVAL")?.parse()?,
-        })
-    }
-}
-
-pub async fn start_monitor(config: &Config, db: Arc<Database>) -> Result<(), Box<dyn Error + Send + Sync>> {
+pub async fn start_monitor(config: &AppConfig, db: Arc<Database>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let api = CryptoAPI::new(config.coingecko_api_key.clone());
     let notification_service = NotificationService::new(config.telegram_token.clone());
     let monitor = PriceMonitor::new(
@@ -58,9 +40,7 @@ pub async fn start_monitor(config: &Config, db: Arc<Database>) -> Result<(), Box
 
 pub async fn start_api(_port: u16, db: Arc<Database>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let exchange_manager = Arc::new(ExchangeManager::new()?);
-    
     api::start_server(db, exchange_manager).await?;
-
     Ok(())
 }
 

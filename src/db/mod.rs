@@ -1,16 +1,56 @@
+use crate::models::{User, PriceAlert, ApiKey, UserState, AlertCondition};
+use crate::exchanges::types::ExchangeCredentials;
 use rusqlite::{params, OptionalExtension};
 use std::fs;
 use std::path::Path;
 use chrono::Utc;
-use crate::{
-    models::{User, PriceAlert, ApiKey, AlertType, UserState},
-    exchanges::ExchangeCredentials,
-};
 use tracing::info;
 use serde_json;
 use tokio_rusqlite::Connection as AsyncConnection;
 use std::sync::Arc;
 use tokio_rusqlite::Error as AsyncSqliteError;
+use rusqlite::ToSql;
+
+#[derive(Debug)]
+pub enum DatabaseError {
+    ForeignKeyViolation(String),
+    SqliteError(rusqlite::Error),
+    Other(String),
+}
+
+impl From<rusqlite::Error> for DatabaseError {
+    fn from(err: rusqlite::Error) -> Self {
+        DatabaseError::SqliteError(err)
+    }
+}
+
+impl std::fmt::Display for DatabaseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DatabaseError::ForeignKeyViolation(msg) => write!(f, "Foreign key violation: {}", msg),
+            DatabaseError::SqliteError(err) => write!(f, "SQLite error: {}", err),
+            DatabaseError::Other(msg) => write!(f, "Database error: {}", msg),
+        }
+    }
+}
+
+impl std::error::Error for DatabaseError {}
+
+impl From<DatabaseError> for tokio_rusqlite::Error {
+    fn from(err: DatabaseError) -> Self {
+        match err {
+            DatabaseError::ForeignKeyViolation(msg) => {
+                tokio_rusqlite::Error::Rusqlite(rusqlite::Error::InvalidParameterName(msg))
+            }
+            DatabaseError::SqliteError(err) => {
+                tokio_rusqlite::Error::Rusqlite(err)
+            }
+            DatabaseError::Other(msg) => {
+                tokio_rusqlite::Error::Rusqlite(rusqlite::Error::InvalidParameterName(msg))
+            }
+        }
+    }
+}
 
 pub struct Database {
     conn: Arc<AsyncConnection>,
@@ -43,14 +83,14 @@ impl Database {
         conn.call(|conn| {
             conn.execute("PRAGMA foreign_keys = ON", [])?;
             
-            // Crear las tablas necesarias
+            // Crear tabla de usuarios primero
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     username TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
                     api_key TEXT UNIQUE,
-                    telegram_chat_id INTEGER,
+                    telegram_chat_id INTEGER UNIQUE,
                     created_at INTEGER NOT NULL,
                     last_login INTEGER,
                     is_active BOOLEAN NOT NULL DEFAULT 1
@@ -58,21 +98,47 @@ impl Database {
                 [],
             )?;
 
+            // Crear tabla de api_keys
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS price_alerts (
+                "CREATE TABLE IF NOT EXISTS api_keys (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id INTEGER NOT NULL,
-                    symbol TEXT NOT NULL,
-                    alert_type TEXT NOT NULL,
+                    key TEXT UNIQUE NOT NULL,
                     created_at INTEGER NOT NULL,
-                    triggered_at INTEGER,
+                    last_used INTEGER,
+                    expires_at INTEGER,
                     is_active BOOLEAN NOT NULL DEFAULT 1,
                     FOREIGN KEY(user_id) REFERENCES users(id)
                 )",
                 [],
             )?;
 
-            // ... otras tablas necesarias ...
+            // Crear tabla de estados de usuario
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS user_states (
+                    chat_id INTEGER PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )",
+                [],
+            )?;
+
+            // Recrear la tabla de alertas con el tipo correcto para condition
+            conn.execute("DROP TABLE IF EXISTS alerts", [])?;
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    target_price REAL NOT NULL,
+                    condition TEXT NOT NULL CHECK(condition IN ('ABOVE', 'BELOW')),
+                    created_at INTEGER NOT NULL,
+                    triggered BOOLEAN NOT NULL DEFAULT 0,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                )",
+                [],
+            )?;
 
             Ok(())
         }).await?;
@@ -115,51 +181,74 @@ impl Database {
         }).await
     }
 
-    pub async fn save_alert(&self, alert: PriceAlert) -> Result<(), AsyncSqliteError> {
-        let alert_clone = alert;
+    pub async fn save_alert(&self, alert: PriceAlert) -> Result<i64, AsyncSqliteError> {
+        let alert_clone = alert.clone();
         self.conn.call(move |conn| {
-            let now = Utc::now().timestamp();
-            let alert_type_json = serde_json::to_string(&alert_clone.alert_type)
-                .map_err(|e| AsyncSqliteError::Other(Box::new(e)))?;
+            tracing::info!("Intentando guardar alerta para usuario {}", alert_clone.user_id);
+            
+            // Verificar que el usuario existe
+            let user_exists: bool = conn.query_row(
+                "SELECT 1 FROM users WHERE id = ?",
+                [alert_clone.user_id],
+                |_| Ok(true)
+            ).unwrap_or(false);
 
-            conn.execute(
-                "INSERT INTO price_alerts (user_id, symbol, alert_type, created_at) 
-                 VALUES (?, ?, ?, ?)",
-                params![
-                    alert_clone.user_id,
-                    alert_clone.symbol,
-                    alert_type_json,
-                    now,
-                ],
+            if !user_exists {
+                tracing::error!("Usuario {} no encontrado", alert_clone.user_id);
+                return Err(DatabaseError::ForeignKeyViolation(
+                    format!("User id {} does not exist", alert_clone.user_id)
+                ).into());
+            }
+
+            tracing::info!("Usuario existe, insertando alerta");
+            let mut stmt = conn.prepare(
+                "INSERT INTO alerts (user_id, symbol, target_price, condition, created_at, triggered)
+                 VALUES (?, ?, ?, ?, ?, ?)"
             )?;
-            Ok(())
+
+            let condition_str = alert_clone.condition.to_string().to_uppercase();
+            tracing::info!(
+                "Guardando alerta: symbol={}, price={}, condition={}, user_id={}",
+                alert_clone.symbol,
+                alert_clone.target_price,
+                condition_str,
+                alert_clone.user_id
+            );
+
+            let id = stmt.insert(params![
+                alert_clone.user_id,
+                alert_clone.symbol,
+                alert_clone.target_price,
+                condition_str,
+                alert_clone.created_at,
+                alert_clone.triggered,
+            ])?;
+
+            tracing::info!("Alerta insertada con id {}", id);
+            Ok(id)
         }).await
     }
 
     pub async fn get_active_alerts(&self) -> Result<Vec<PriceAlert>, AsyncSqliteError> {
-        self.conn.call(|conn| {
+        self.conn.call(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, user_id, symbol, alert_type, created_at, triggered_at, is_active 
-                 FROM price_alerts 
-                 WHERE is_active = 1 AND triggered_at IS NULL"
+                "SELECT id, user_id, symbol, target_price, condition, created_at, triggered 
+                 FROM alerts 
+                 WHERE triggered = 0"
             )?;
 
             let alerts = stmt.query_map([], |row| {
-                let alert_type_json: String = row.get(3)?;
-                let alert_type: AlertType = serde_json::from_str(&alert_type_json)
-                    .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
-
                 Ok(PriceAlert {
                     id: Some(row.get(0)?),
                     user_id: row.get(1)?,
                     symbol: row.get(2)?,
-                    alert_type,
-                    created_at: row.get(4)?,
-                    triggered_at: row.get(5)?,
-                    is_active: row.get(6)?,
+                    target_price: row.get(3)?,
+                    condition: row.get(4)?,
+                    created_at: row.get(5)?,
+                    triggered: row.get(6)?,
                 })
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
 
             Ok(alerts)
         }).await
@@ -167,10 +256,9 @@ impl Database {
 
     pub async fn mark_alert_triggered(&self, alert_id: i64) -> Result<(), AsyncSqliteError> {
         self.conn.call(move |conn| {
-            let now = Utc::now().timestamp();
             conn.execute(
-                "UPDATE price_alerts SET triggered_at = ?, is_active = 0 WHERE id = ?",
-                params![now, alert_id],
+                "UPDATE alerts SET triggered = 1 WHERE id = ?",
+                [alert_id]
             )?;
             Ok(())
         }).await
@@ -226,29 +314,72 @@ impl Database {
     }
 
     pub async fn get_user_alerts(&self, user_id: i64) -> Result<Vec<PriceAlert>, AsyncSqliteError> {
+        let user_id = user_id;
         self.conn.call(move |conn| {
+            tracing::info!("Buscando alertas para usuario {}", user_id);
+            
+            // Primero verificar si hay alertas
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM alerts WHERE user_id = ? AND triggered = 0",
+                [user_id],
+                |row| row.get(0)
+            )?;
+            
+            tracing::info!("Encontradas {} alertas sin procesar", count);
+
             let mut stmt = conn.prepare(
-                "SELECT id, user_id, symbol, alert_type, created_at, triggered_at, is_active 
-                 FROM price_alerts 
-                 WHERE user_id = ?"
+                "SELECT id, user_id, symbol, target_price, condition, created_at, triggered 
+                 FROM alerts 
+                 WHERE user_id = ? AND triggered = 0
+                 ORDER BY created_at DESC"
             )?;
 
             let alerts = stmt.query_map([user_id], |row| {
-                let alert_type_json: String = row.get(3)?;
-                let alert_type: AlertType = serde_json::from_str(&alert_type_json)
-                    .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+                let id: i64 = row.get(0)?;
+                let user_id: i64 = row.get(1)?;
+                let symbol: String = row.get(2)?;
+                let target_price: f64 = row.get(3)?;
+                let condition_str: String = row.get(4)?;
+                let created_at: i64 = row.get(5)?;
+                let triggered: bool = row.get(6)?;
+
+                tracing::info!(
+                    "Procesando alerta: id={}, user_id={}, symbol={}, price={}, condition={}, created={}, triggered={}",
+                    id, user_id, symbol, target_price, condition_str, created_at, triggered
+                );
+
+                let condition = match condition_str.to_uppercase().as_str() {
+                    "ABOVE" => AlertCondition::Above,
+                    "BELOW" => AlertCondition::Below,
+                    other => {
+                        tracing::warn!("Condición inválida en la base de datos: {}", other);
+                        AlertCondition::Above // valor por defecto
+                    }
+                };
 
                 Ok(PriceAlert {
-                    id: Some(row.get(0)?),
-                    user_id: row.get(1)?,
-                    symbol: row.get(2)?,
-                    alert_type,
-                    created_at: row.get(4)?,
-                    triggered_at: row.get(5)?,
-                    is_active: row.get(6)?,
+                    id: Some(id),
+                    user_id,
+                    symbol,
+                    target_price,
+                    condition,
+                    created_at,
+                    triggered,
                 })
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+            .filter_map(|result| {
+                if let Err(ref e) = result {
+                    tracing::error!("Error al procesar alerta: {}", e);
+                }
+                result.ok()
+            })
+            .collect::<Vec<_>>();
+
+            tracing::info!(
+                "Recuperadas {} alertas activas para el usuario {}",
+                alerts.len(),
+                user_id
+            );
 
             Ok(alerts)
         }).await
@@ -314,24 +445,20 @@ impl Database {
     pub async fn get_alert(&self, alert_id: i64) -> Result<Option<PriceAlert>, AsyncSqliteError> {
         self.conn.call(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, user_id, symbol, alert_type, created_at, triggered_at, is_active 
-                 FROM price_alerts 
+                "SELECT id, user_id, symbol, target_price, condition, created_at, triggered 
+                 FROM alerts 
                  WHERE id = ?"
             )?;
 
             let alert = stmt.query_row([alert_id], |row| {
-                let alert_type_json: String = row.get(3)?;
-                let alert_type: AlertType = serde_json::from_str(&alert_type_json)
-                    .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
-
                 Ok(PriceAlert {
                     id: Some(row.get(0)?),
                     user_id: row.get(1)?,
                     symbol: row.get(2)?,
-                    alert_type,
-                    created_at: row.get(4)?,
-                    triggered_at: row.get(5)?,
-                    is_active: row.get(6)?,
+                    target_price: row.get(3)?,
+                    condition: row.get(4)?,
+                    created_at: row.get(5)?,
+                    triggered: row.get(6)?,
                 })
             }).optional()?;
 
@@ -342,8 +469,8 @@ impl Database {
     pub async fn delete_alert(&self, alert_id: i64) -> Result<(), AsyncSqliteError> {
         self.conn.call(move |conn| {
             conn.execute(
-                "DELETE FROM price_alerts WHERE id = ?",
-                params![alert_id],
+                "DELETE FROM alerts WHERE id = ?",
+                [alert_id],
             )?;
             Ok(())
         }).await
@@ -405,6 +532,44 @@ impl Database {
                 [user_id],
                 |row| row.get(0)
             ).optional()?)
+        }).await
+    }
+
+    pub async fn create_price_alert(&self, alert: PriceAlert) -> Result<i64, AsyncSqliteError> {
+        let alert_clone = alert;
+        self.conn.call(move |conn| {
+            let mut stmt = conn.prepare(
+                "INSERT INTO alerts (user_id, symbol, target_price, condition, created_at, triggered) 
+                 VALUES (?, ?, ?, ?, ?, ?)"
+            )?;
+
+            let id = stmt.insert([
+                &alert_clone.user_id as &dyn ToSql,
+                &alert_clone.symbol as &dyn ToSql,
+                &alert_clone.target_price as &dyn ToSql,
+                &alert_clone.condition.to_string() as &dyn ToSql,
+                &alert_clone.created_at as &dyn ToSql,
+                &alert_clone.triggered as &dyn ToSql,
+            ])?;
+
+            Ok(id)
+        }).await
+    }
+
+    pub async fn create_telegram_user(&self, telegram_id: i64, username: &str) -> Result<i64, AsyncSqliteError> {
+        let username = username.to_string();
+        self.conn.call(move |conn| {
+            let now = Utc::now().timestamp();
+            
+            // Insertar el usuario
+            conn.execute(
+                "INSERT INTO users (username, password_hash, telegram_chat_id, created_at, is_active) 
+                 VALUES (?, '', ?, ?, 1)",
+                params![username, telegram_id, now]
+            )?;
+            
+            let user_id = conn.last_insert_rowid();
+            Ok(user_id)
         }).await
     }
 }

@@ -26,6 +26,19 @@ pub enum OrderType {
     TakeProfitLimit,
 }
 
+impl std::fmt::Display for OrderType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OrderType::Market => write!(f, "Market"),
+            OrderType::Limit => write!(f, "Limit"),
+            OrderType::StopLoss => write!(f, "Stop Loss"),
+            OrderType::StopLossLimit => write!(f, "Stop Loss Limit"),
+            OrderType::TakeProfit => write!(f, "Take Profit"),
+            OrderType::TakeProfitLimit => write!(f, "Take Profit Limit"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Order {
     pub id: String,

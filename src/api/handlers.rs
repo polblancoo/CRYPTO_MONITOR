@@ -1,3 +1,24 @@
+use crate::{
+    models::{
+        User, 
+        PriceAlert, 
+        AlertCondition,
+        Order as ModelOrder,
+        OrderSide as ModelOrderSide,
+        OrderType as ModelOrderType,
+        OrderStatus,
+        Balance
+    },
+    exchanges::{
+        self,
+        types::{Exchange, OrderSide, OrderType, Order as ExchangeOrder},
+        ExchangeType
+    },
+    Auth,
+    crypto_api::CryptoAPI,
+};
+use super::ApiState;
+use super::extractors::BearerAuth;
 use axum::{
     extract::{Json, Path, State},
     http::StatusCode,
@@ -5,15 +26,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use crate::{
-    models::{self, User, PriceAlert, AlertType, AlertCondition},
-    crypto_api::CryptoAPI,
-    exchanges::{self, ExchangeType},
-    Auth,
-};
-use super::ApiState;
-use super::extractors::BearerAuth;
-use std::str::FromStr;
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
@@ -116,22 +128,28 @@ pub async fn create_price_alert(
 ) -> impl IntoResponse {
     match state.db.verify_api_key(&token).await {
         Ok(Some(user)) => {
-            let alert = PriceAlert {
-                id: None,
-                user_id: user.id,
-                symbol: payload.symbol,
-                alert_type: AlertType::Price {
-                    target_price: payload.target_price,
-                    condition: payload.condition,
-                },
-                created_at: Some(chrono::Utc::now().timestamp()),
-                triggered_at: None,
-                is_active: true,
-            };
+            let alert = PriceAlert::new(
+                None,
+                user.id,
+                payload.symbol,
+                payload.target_price,
+                payload.condition,
+            );
 
-            match state.db.save_alert(alert).await {
-                Ok(_) => StatusCode::CREATED.into_response(),
-                Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            match state.db.create_price_alert(alert).await {
+                Ok(id) => (
+                    StatusCode::CREATED,
+                    Json(json!({
+                        "id": id,
+                        "message": "Alert created successfully"
+                    }))
+                ).into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": format!("Failed to create alert: {}", e)
+                    }))
+                ).into_response(),
             }
         }
         Ok(None) => StatusCode::UNAUTHORIZED.into_response(),
@@ -146,29 +164,28 @@ pub async fn create_depeg_alert(
 ) -> impl IntoResponse {
     match state.db.verify_api_key(&token).await {
         Ok(Some(user)) => {
-            let exchanges = payload.exchanges.unwrap_or_else(|| vec![
-                "binance".to_string(),
-                "coinbase".to_string(),
-                "kraken".to_string(),
-            ]);
+            let alert = PriceAlert::new(
+                None,
+                user.id,
+                payload.symbol,
+                payload.target_price,
+                AlertCondition::Above, // o Below según el caso
+            );
 
-            let alert = PriceAlert {
-                id: None,
-                user_id: user.id,
-                symbol: payload.symbol,
-                alert_type: AlertType::Depeg {
-                    target_price: payload.target_price,
-                    differential: payload.differential,
-                    exchanges,
-                },
-                created_at: Some(chrono::Utc::now().timestamp()),
-                triggered_at: None,
-                is_active: true,
-            };
-
-            match state.db.save_alert(alert).await {
-                Ok(_) => StatusCode::CREATED.into_response(),
-                Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            match state.db.create_price_alert(alert).await {
+                Ok(id) => (
+                    StatusCode::CREATED,
+                    Json(json!({
+                        "id": id,
+                        "message": "Alert created successfully"
+                    }))
+                ).into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": format!("Failed to create alert: {}", e)
+                    }))
+                ).into_response(),
             }
         }
         Ok(None) => StatusCode::UNAUTHORIZED.into_response(),
@@ -183,24 +200,28 @@ pub async fn create_pair_alert(
 ) -> impl IntoResponse {
     match state.db.verify_api_key(&token).await {
         Ok(Some(user)) => {
-            let alert = PriceAlert {
-                id: None,
-                user_id: user.id,
-                symbol: format!("{}/{}", payload.token1, payload.token2),
-                alert_type: AlertType::PairDepeg {
-                    token1: payload.token1,
-                    token2: payload.token2,
-                    expected_ratio: payload.expected_ratio,
-                    differential: payload.differential,
-                },
-                created_at: Some(chrono::Utc::now().timestamp()),
-                triggered_at: None,
-                is_active: true,
-            };
+            let alert = PriceAlert::new(
+                None,
+                user.id,
+                format!("{}/{}", payload.token1, payload.token2),
+                payload.expected_ratio,
+                AlertCondition::Above,
+            );
 
-            match state.db.save_alert(alert).await {
-                Ok(_) => StatusCode::CREATED.into_response(),
-                Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            match state.db.create_price_alert(alert).await {
+                Ok(id) => (
+                    StatusCode::CREATED,
+                    Json(json!({
+                        "id": id,
+                        "message": "Alert created successfully"
+                    }))
+                ).into_response(),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": format!("Failed to create alert: {}", e)
+                    }))
+                ).into_response(),
             }
         }
         Ok(None) => StatusCode::UNAUTHORIZED.into_response(),
@@ -294,78 +315,81 @@ pub async fn get_supported_symbols(
     Json(api.supported_symbols())
 }
 
+#[axum::debug_handler]
 pub async fn place_order(
     State(state): State<ApiState>,
     auth: BearerAuth,
-    Json(req): Json<models::OrderRequest>,
-) -> Result<Json<models::Order>, StatusCode> {
-    let user_id = auth.0.parse::<i64>()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    Json(order): Json<ModelOrder>,
+) -> Result<Json<ModelOrder>, StatusCode> {
+    match state.db.verify_api_key(&auth.0).await {
+        Ok(Some(_user)) => {
+            match state.exchange_manager.place_order(
+                &order.symbol,
+                convert_model_side_to_exchange(order.side),
+                convert_model_type_to_exchange(order.order_type),
+                order.quantity,
+                order.price,
+            ).await {
+                Ok(exchange_order) => Ok(Json(convert_exchange_order_to_model(exchange_order))),
+                Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+            }
+        }
+        Ok(None) => Err(StatusCode::UNAUTHORIZED),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
 
-    let _user = state.db.get_user_api_key(user_id)
-        .await
-        .map_err(|_| StatusCode::UNAUTHORIZED)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+fn convert_model_side_to_exchange(side: ModelOrderSide) -> OrderSide {
+    match side {
+        ModelOrderSide::Buy => OrderSide::Buy,
+        ModelOrderSide::Sell => OrderSide::Sell,
+    }
+}
 
-    let exchange_type = ExchangeType::from_str(&req.exchange)
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+fn convert_model_type_to_exchange(order_type: ModelOrderType) -> OrderType {
+    match order_type {
+        ModelOrderType::Market => OrderType::Market,
+        ModelOrderType::Limit => OrderType::Limit,
+        ModelOrderType::StopLoss => OrderType::StopLoss,
+        ModelOrderType::StopLossLimit => OrderType::StopLossLimit,
+        ModelOrderType::TakeProfit => OrderType::TakeProfit,
+        ModelOrderType::TakeProfitLimit => OrderType::TakeProfitLimit,
+    }
+}
 
-    // Convertir tipos
-    let exchange_order = exchanges::OrderRequest {
-        symbol: req.symbol,
-        side: match req.side {
-            models::OrderSide::Buy => exchanges::OrderSide::Buy,
-            models::OrderSide::Sell => exchanges::OrderSide::Sell,
-        },
-        order_type: match req.order_type {
-            models::OrderType::Market => exchanges::OrderType::Market,
-            models::OrderType::Limit => exchanges::OrderType::Limit,
-            models::OrderType::StopLoss => exchanges::OrderType::StopLoss,
-            models::OrderType::StopLossLimit => exchanges::OrderType::StopLossLimit,
-            models::OrderType::TakeProfit => exchanges::OrderType::TakeProfit,
-            models::OrderType::TakeProfitLimit => exchanges::OrderType::TakeProfitLimit,
-        },
-        quantity: req.quantity,
-        price: req.price,
-    };
-
-    let order = state.exchange_manager
-        .execute_order(exchange_type, exchange_order)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Convertir de vuelta a modelo
-    let model_order = models::Order {
+fn convert_exchange_order_to_model(order: ExchangeOrder) -> ModelOrder {
+    use crate::models::{OrderType as ModelOrderType, OrderSide as ModelOrderSide, OrderStatus as ModelOrderStatus};
+    use crate::exchanges::types::{OrderType, OrderSide, OrderStatus};
+    
+    ModelOrder {
         id: order.id,
         symbol: order.symbol,
         order_type: match order.order_type {
-            exchanges::OrderType::Market => models::OrderType::Market,
-            exchanges::OrderType::Limit => models::OrderType::Limit,
-            exchanges::OrderType::StopLoss => models::OrderType::StopLoss,
-            exchanges::OrderType::StopLossLimit => models::OrderType::StopLossLimit,
-            exchanges::OrderType::TakeProfit => models::OrderType::TakeProfit,
-            exchanges::OrderType::TakeProfitLimit => models::OrderType::TakeProfitLimit,
+            OrderType::Market => ModelOrderType::Market,
+            OrderType::Limit => ModelOrderType::Limit,
+            OrderType::StopLoss => ModelOrderType::StopLoss,
+            OrderType::StopLossLimit => ModelOrderType::StopLossLimit,
+            OrderType::TakeProfit => ModelOrderType::TakeProfit,
+            OrderType::TakeProfitLimit => ModelOrderType::TakeProfitLimit,
         },
         side: match order.side {
-            exchanges::OrderSide::Buy => models::OrderSide::Buy,
-            exchanges::OrderSide::Sell => models::OrderSide::Sell,
+            OrderSide::Buy => ModelOrderSide::Buy,
+            OrderSide::Sell => ModelOrderSide::Sell,
         },
         price: order.price,
         quantity: order.quantity,
         filled_quantity: order.filled_quantity,
         status: match order.status {
-            exchanges::OrderStatus::New => models::OrderStatus::New,
-            exchanges::OrderStatus::PartiallyFilled => models::OrderStatus::PartiallyFilled,
-            exchanges::OrderStatus::Filled => models::OrderStatus::Filled,
-            exchanges::OrderStatus::Canceled => models::OrderStatus::Canceled,
-            exchanges::OrderStatus::Rejected => models::OrderStatus::Rejected,
-            exchanges::OrderStatus::Expired => models::OrderStatus::Expired,
+            OrderStatus::New => ModelOrderStatus::New,
+            OrderStatus::PartiallyFilled => ModelOrderStatus::PartiallyFilled,
+            OrderStatus::Filled => ModelOrderStatus::Filled,
+            OrderStatus::Canceled => ModelOrderStatus::Canceled,
+            OrderStatus::Rejected => ModelOrderStatus::Rejected,
+            OrderStatus::Expired => ModelOrderStatus::Expired,
         },
         created_at: order.created_at,
         updated_at: order.updated_at,
-    };
-
-    Ok(Json(model_order))
+    }
 }
 
 pub async fn cancel_order(
@@ -381,9 +405,14 @@ pub async fn cancel_order(
         .map_err(|_| StatusCode::UNAUTHORIZED)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // Por ahora asumimos Binance como exchange por defecto
+    // Obtener el símbolo de la orden antes de cancelarla
+    let order = state.exchange_manager
+        .get_order("", &order_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     state.exchange_manager
-        .cancel_order(ExchangeType::Binance, &order_id)
+        .cancel_order(ExchangeType::Binance, &order.symbol, &order_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -393,7 +422,7 @@ pub async fn cancel_order(
 pub async fn get_orders(
     State(state): State<ApiState>,
     auth: BearerAuth,
-) -> Result<Json<Vec<models::Order>>, StatusCode> {
+) -> Result<Json<Vec<ModelOrder>>, StatusCode> {
     let user_id = auth.0.parse::<i64>()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -403,41 +432,13 @@ pub async fn get_orders(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     let exchange_orders = state.exchange_manager
-        .get_open_orders(ExchangeType::Binance)  // Por ahora usamos Binance por defecto
+        .get_open_orders(ExchangeType::Binance)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Convertir los tipos
+    // Convertir los tipos usando la función helper
     let model_orders = exchange_orders.into_iter()
-        .map(|order| models::Order {
-            id: order.id,
-            symbol: order.symbol,
-            order_type: match order.order_type {
-                exchanges::OrderType::Market => models::OrderType::Market,
-                exchanges::OrderType::Limit => models::OrderType::Limit,
-                exchanges::OrderType::StopLoss => models::OrderType::StopLoss,
-                exchanges::OrderType::StopLossLimit => models::OrderType::StopLossLimit,
-                exchanges::OrderType::TakeProfit => models::OrderType::TakeProfit,
-                exchanges::OrderType::TakeProfitLimit => models::OrderType::TakeProfitLimit,
-            },
-            side: match order.side {
-                exchanges::OrderSide::Buy => models::OrderSide::Buy,
-                exchanges::OrderSide::Sell => models::OrderSide::Sell,
-            },
-            price: order.price,
-            quantity: order.quantity,
-            filled_quantity: order.filled_quantity,
-            status: match order.status {
-                exchanges::OrderStatus::New => models::OrderStatus::New,
-                exchanges::OrderStatus::PartiallyFilled => models::OrderStatus::PartiallyFilled,
-                exchanges::OrderStatus::Filled => models::OrderStatus::Filled,
-                exchanges::OrderStatus::Canceled => models::OrderStatus::Canceled,
-                exchanges::OrderStatus::Rejected => models::OrderStatus::Rejected,
-                exchanges::OrderStatus::Expired => models::OrderStatus::Expired,
-            },
-            created_at: order.created_at,
-            updated_at: order.updated_at,
-        })
+        .map(convert_exchange_order_to_model)
         .collect();
 
     Ok(Json(model_orders))
@@ -446,7 +447,7 @@ pub async fn get_orders(
 pub async fn get_balance(
     State(state): State<ApiState>,
     auth: BearerAuth,
-) -> Result<Json<Vec<models::Balance>>, StatusCode> {
+) -> Result<Json<Vec<Balance>>, StatusCode> {
     let user_id = auth.0.parse::<i64>()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
@@ -462,7 +463,7 @@ pub async fn get_balance(
 
     // Convertir los tipos
     let model_balances = exchange_balances.into_iter()
-        .map(|balance| models::Balance {
+        .map(|balance| Balance {
             asset: balance.asset,
             free: balance.free,
             locked: balance.locked,
@@ -497,14 +498,22 @@ pub async fn create_alert(
     match state.db.verify_api_key(&auth.0).await {
         Ok(Some(user)) => {
             alert.user_id = user.id;
-            alert.created_at = Some(chrono::Utc::now().timestamp());
+            alert.created_at = chrono::Utc::now().timestamp();
+            alert.triggered = false;
+            
             match state.db.save_alert(alert).await {
                 Ok(_) => StatusCode::CREATED.into_response(),
-                Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+                Err(e) => {
+                    tracing::error!("Error al guardar alerta: {}", e);
+                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                }
             }
         }
         Ok(None) => StatusCode::UNAUTHORIZED.into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(e) => {
+            tracing::error!("Error al verificar API key: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 
@@ -523,6 +532,11 @@ pub async fn get_alerts(
         Ok(None) => StatusCode::UNAUTHORIZED.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+pub async fn update_alert(alert: &mut PriceAlert) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    alert.created_at = chrono::Utc::now().timestamp();
+    Ok(())
 }
 
 // ... continuará con los handlers de alertas ... 
